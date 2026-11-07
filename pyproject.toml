@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dp-distribution-shift"
+version = "0.1.0"
+description = "Readmission prevalence-shift experiment with ordinary and private training"
+requires-python = ">=3.11"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[project.scripts]
+dp-shift = "dp_shift.cli:main"
+dp-shift-data = "dp_shift.data.prepare:main"
+dp-shift-train = "dp_shift.training.run:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
