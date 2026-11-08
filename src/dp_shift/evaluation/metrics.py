@@ -19,7 +19,9 @@ CURVE_FIELDS = ("precision", "recall", "calibration_n", "calibration_positive_n"
 
 def model_label(path):
     method, initialization = CONDITIONS[path]
-    return f"{'SGD' if method == 'sgd' else 'DP-SGD'} · {initialization.upper() if initialization != 'scratch' else 'Scratch'}"
+    label = {"scratch": "No pretraining", "s0": "Baseline-source pretraining",
+             "s1": "Shifted-source pretraining"}[initialization]
+    return f"{'SGD' if method == 'sgd' else 'DP-SGD'} · {label}"
 
 
 def validate_probabilities(y, probability):

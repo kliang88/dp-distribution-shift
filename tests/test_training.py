@@ -30,7 +30,9 @@ def cpu():
 def settings():
     config = load_config(ROOT / "configs/experiment.json")
     config.update(source_lr=.01, target_lr=.01, source_epochs=2, source_batch_size=16,
-                  target_epochs=1, noise_multiplier=calibrate_noise(1))
+                  target_epochs=1, noise_multiplier=calibrate_noise(
+                      1, config["steps_per_epoch"], config["delta"],
+                      config["epsilon_cap"], config["calibration_epsilon"]))
     return config
 
 
@@ -133,7 +135,7 @@ def test_private_training_budget_and_rng_permissions(tmp_path, settings):
     epsilon = predicted_epsilon(settings["noise_multiplier"], 1/12, 12, settings["delta"])
     assert result["steps"] == result["privacy"]["steps"] == 12
     assert result["privacy"]["epsilon_achieved"] == pytest.approx(epsilon)
-    assert epsilon <= 8
+    assert epsilon <= settings["epsilon_cap"]
     assert sum(count for _, _, count in result["accountant_state"]["history"]) == 12
     invalid = {**settings, "noise_multiplier": 0.}
     with pytest.raises(ValueError, match="positive noise"):

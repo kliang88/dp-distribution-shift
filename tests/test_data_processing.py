@@ -174,8 +174,15 @@ def prepared(tmp_path_factory):
 
 def test_real_data_build_and_reproducibility(prepared, tmp_path):
     output, summary = prepared
-    repeats = read_json(CONFIG_PATH)["repeats"]
-    assert summary == {"patients": 69973, "input_dimension": 74, "source_pairs": repeats, "target_train_n": 3000}
+    choices = read_json(CONFIG_PATH)
+    repeats = choices["repeats"]
+    source = choices["source_conditions"]
+    expected_positive_n = round(source["pretrain_size"] * source["shifted_positive_rate"])
+    preprocessing = read_json(output / "preprocessing/metadata.json")
+    expected_dimension = len(preprocessing["numeric_features"]) + sum(
+        len(categories) for categories in preprocessing["categories"].values())
+    assert summary == {"patients": 69973, "input_dimension": expected_dimension, "source_pairs": repeats,
+                       "target_train_n": choices["data"]["target_train_size"]}
     assert not (output / "evaluation").exists()
     assert not (output / "arrays/target_test.npz").exists()
     assert verify_artifacts(output) == summary
@@ -195,7 +202,8 @@ def test_real_data_build_and_reproducibility(prepared, tmp_path):
     assert read_json(output / "preprocessing/metadata.json") == read_json(second / "preprocessing/metadata.json")
     for repeat in range(repeats):
         shifted = load_training_data(output, "s1", repeat)
-        assert shifted["X"].shape == (16000, summary["input_dimension"]) and shifted["y"].sum() == 800
+        assert shifted["X"].shape == (source["pretrain_size"], summary["input_dimension"])
+        assert shifted["y"].sum() == expected_positive_n
         for name in ["s0", "s1", "removed", "added"]:
             relative = f"source_pairs/repeat_{repeat:02d}/{name}.csv"
             assert (output / relative).read_bytes() == (second / relative).read_bytes()

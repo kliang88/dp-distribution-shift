@@ -166,9 +166,9 @@ Four PNGs are saved under `<output>/evaluation/figures/`:
 | Figure | How to read it |
 |---|---|
 | `performance.png` | AP, AUROC, and Brier for all six models. Small dots are repeats; large points and bars are means and 95% intervals. |
-| `paired_effects.png` | Three panels answer whether pretraining helps, whether S1 hurts, and whether DP responds differently. Points and bars show paired means and 95% intervals; panels use separate horizontal scales. |
-| `precision_recall.png` | S0 and S1 panels each compare SGD/DP-SGD × scratch/pretrained. Bold lines show mean step precision on a common recall grid; faint lines show repeats. The dotted line is test prevalence. |
-| `calibration.png` | SGD/DP-SGD rows and Scratch/S0/S1 columns. Each curve is a repeat; histograms below show prediction distributions averaged across repeats. |
+| `paired_effects.png` | Three panels answer whether pretraining helps, whether the source distribution shift hurts, and whether DP responds differently. Points and bars show paired means and 95% intervals; panels use separate horizontal scales. |
+| `precision_recall.png` | Baseline-source and shifted-source columns compare SGD/DP-SGD with and without pretraining. The top row shows the full precision range; the bottom row enlarges precision 0–35%. Bold lines show mean step precision on a common recall grid; faint lines show repeats. The dotted line is test prevalence. |
+| `calibration.png` | SGD/DP-SGD rows and no-pretraining/baseline-source/shifted-source-pretraining columns. Each curve is a repeat; annotations show mean risk bias in percentage points. Histograms use a common vertical scale and show prediction distributions averaged across repeats, with test prevalence marked by a dotted vertical line. |
 
 In `paired_effects.png`, the calculations are:
 
@@ -176,7 +176,7 @@ In `paired_effects.png`, the calculations are:
 2. **Source-shift effect:** S1 AP − S0 AP. Negative means S1 performs worse.
 3. **DP interaction:** DP-SGD shift − SGD shift. Negative means DP responds less
    favorably to the source shift. A value near zero means similar shift effects,
-   **not a model score of zero**. The shaded band is ±0.5 AP percentage points.
+   **not a model score of zero**.
 
 In `calibration.png`, patients are grouped by predicted risk, not sampled
 randomly. For each model/repeat, sort all test patients into up to ten quantile
@@ -185,9 +185,8 @@ prediction (x) with its actual readmission fraction (y). Above the diagonal
 means underprediction; below means overprediction. All panels share a relevant
 risk range; histogram mass outside that range is labeled.
 
-Performance reference lines show constant-score AP, chance AUROC, and Brier for
-a constant probability equal to test prevalence. That Brier reference is
-descriptive. PR panels reuse the same scratch models; predictions are not
+Performance reference lines show constant-score AP and chance AUROC. The Brier
+panel has no reference line. PR panels reuse the same scratch models; predictions are not
 ensembled, and AP is calculated from exact per-run curves.
 
 ### Supporting files and cleanup

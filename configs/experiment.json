@@ -2,18 +2,18 @@
   "seed": 20261107,
   "repeats": 10,
   "data": {
-    "source_pool_size": 37784,
-    "proxy_train_size": 3000,
-    "proxy_validation_size": 1199,
-    "target_train_size": 3000,
-    "target_test_size": 5598
+    "source_pool_size": 48000,
+    "proxy_train_size": 3600,
+    "proxy_validation_size": 1200,
+    "target_train_size": 3600,
+    "target_test_size": 6000
   },
   "source_conditions": {
-    "pretrain_size": 16000,
+    "pretrain_size": 24000,
     "shifted_positive_rate": 0.01
   },
   "privacy": {
-    "epsilon": 8.0,
+    "epsilon": 5.0,
     "clipping_norm": 1.0
   },
   "tuning": {

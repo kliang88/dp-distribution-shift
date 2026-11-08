@@ -71,9 +71,11 @@ def test_defaults_and_seeds_are_resolved_without_mutating_choices(choices):
     first = resolve_config(choices)
     assert choices == original
     assert first == load_config(CONFIG)
-    assert first["source_positive_n"] == 800
-    assert first["calibration_epsilon"] == pytest.approx(7.99)
-    assert first["source_epochs"] == 12 and first["steps_per_epoch"] == 12
+    source = choices["source_conditions"]
+    assert first["source_positive_n"] == round(source["pretrain_size"] * source["shifted_positive_rate"])
+    assert first["calibration_epsilon"] == pytest.approx(choices["privacy"]["epsilon"] * (7.99 / 8))
+    assert first["source_epochs"] == choices["tuning"]["source_epochs"]
+    assert first["steps_per_epoch"] == 12
     assert len(set(first["seeds"].values())) == len(first["seeds"])
     choices["seed"] += 1
     second = resolve_config(choices)
