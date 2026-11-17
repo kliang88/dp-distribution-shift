@@ -1,5 +1,6 @@
 """The fixed public-only search. Final target data never enter this module."""
 
+from dataclasses import asdict
 from importlib.metadata import version
 from pathlib import Path
 import platform
@@ -9,7 +10,8 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 import torch
 
-from dp_shift.config import load_config
+from dp_shift.config import (PROTOCOL, PROTOCOL_VERSION, ResolvedConfig, SelectedHyperparameters, TrainingSettings,
+                             load_config, resolve_config)
 from dp_shift.data.artifacts import load_training_data
 from dp_shift.data.utils import file_hash, read_json, require
 from .checkpoints import atomic_json, execute_job, load_checkpoint
@@ -29,12 +31,34 @@ def versions():
             ["torch", "opacus", "numpy", "pandas", "scikit-learn", "scipy", "joblib"]}}
 
 
-def settings(config, source_lr, target_lr=None, target_epochs=None):
-    result = {**config, "source_lr": source_lr, "target_lr": target_lr, "target_epochs": target_epochs}
+def settings(config: ResolvedConfig, source_lr, target_lr=None, target_epochs=None) -> TrainingSettings:
+    selected = SelectedHyperparameters(source_lr, target_lr, target_epochs)
+    noise = None
     if target_epochs is not None:
-        result["noise_multiplier"] = calibrate_noise(target_epochs, config["steps_per_epoch"],
-            config["delta"], config["epsilon_cap"], config["calibration_epsilon"])
-    return result
+        noise = calibrate_noise(target_epochs, PROTOCOL.steps_per_epoch,
+                                PROTOCOL.delta, config.requested.privacy.epsilon, config.calibration_epsilon)
+    return TrainingSettings(config, selected, noise)
+
+
+def training_settings(frozen) -> TrainingSettings:
+    """Restore typed runtime settings from the frozen training record."""
+    return TrainingSettings(resolve_config(frozen["training_config"]["experiment"]),
+                            SelectedHyperparameters(**frozen["selected"]), frozen["noise_multiplier"])
+
+
+def freeze_settings(data_root, output, config_path, config, selected, rows):
+    require(selected.target_epochs is not None, "Final training requires target hyperparameters")
+    chosen = settings(config, selected.source_lr, selected.target_lr, selected.target_epochs)
+    candidates = Path(output) / "tuning/candidates.csv"
+    frozen = {**public_context(data_root, config_path), "protocol_version": PROTOCOL_VERSION,
+              "training_config": config.to_dict(), "selected": asdict(selected),
+              "noise_multiplier": chosen.noise_multiplier,
+              "input_dimension": read_json(Path(data_root) / "preprocessing/metadata.json")["input_dimension"],
+              "candidate_results": rows,
+              "tuning_candidates_sha256": file_hash(candidates) if rows else None,
+              "cpu_threads": 1, "deterministic_algorithms": True}
+    atomic_json(Path(output) / "frozen_protocol.json", frozen)
+    return frozen
 
 
 def predict(model, data):
@@ -85,7 +109,7 @@ def public_source(data_root, config):
     pool = load_training_data(data_root, "source_pool")
     membership = pd.read_csv(Path(data_root) / "manifests/source_pool.csv")
     count = read_json(Path(data_root) / "config.json")["pretrain_size"]
-    selected = membership.sample(n=count, random_state=config["seeds"]["tuning_sample"]).sort_values("patient_nbr")
+    selected = membership.sample(n=count, random_state=config.seeds.tuning_sample).sort_values("patient_nbr")
     indices = selected.position.to_numpy(dtype=np.int64)
     return {**pool, "X": pool["X"][indices], "y": pool["y"][indices]}, pool
 
@@ -100,8 +124,9 @@ def load_frozen(data_root, output):
     require(frozen["data"] == read_json(Path(data_root) / "COMPLETE.json"), "Frozen data identity mismatch")
     require(frozen["versions"] == versions(), "Training dependency versions changed")
     require(frozen["code_hashes"] == code_hashes(), "Training/evaluation source code changed after freezing")
-    require(file_hash(Path(output) / "tuning/candidates.csv") == frozen["tuning_candidates_sha256"],
-            "Public tuning ledger changed after freezing")
+    if frozen["tuning_candidates_sha256"] is not None:
+        require(file_hash(Path(output) / "tuning/candidates.csv") == frozen["tuning_candidates_sha256"],
+                "Public tuning ledger changed after freezing")
     return frozen
 
 
@@ -112,17 +137,21 @@ def run_public_job(path, context, candidate_id, model, train, internal_path):
     return load_checkpoint(path, metadata)[0]
 
 
-def tune(data_root, output, config_path):
+def tune(data_root, output, config_path, *, selected: SelectedHyperparameters | None = None):
     output, config_path = Path(output), Path(config_path)
     config = load_config(config_path)
-    require(config["experiment"] == read_json(Path(data_root) / "config.json")["experiment"],
+    require(config.requested.to_dict() == read_json(Path(data_root) / "config.json")["experiment"],
             "Experiment configuration differs from prepared data; use a new output directory")
     if (output / "frozen_protocol.json").exists():
         frozen = load_frozen(data_root, output)
-        require(frozen["training_config"] == config, "Frozen training configuration differs")
+        require(frozen["training_config"] == config.to_dict(), "Frozen training configuration differs")
+        if selected is not None:
+            require(frozen["selected"] == asdict(selected), "Frozen hyperparameters differ")
         return frozen
     directory = output / "tuning"
     require(not directory.exists(), "Partial tuning output exists; investigate it and use a new output directory")
+    if selected is not None:
+        return freeze_settings(data_root, output, config_path, config, selected, [])
     directory.mkdir(parents=True)
     context = public_context(data_root, config_path)
     atomic_json(directory / "context.json", context)
@@ -130,16 +159,16 @@ def tune(data_root, output, config_path):
     proxy = load_training_data(data_root, "proxy_train")
     validation = load_training_data(data_root, "proxy_validation")
     dimension = source["input_dimension"]
-    seeds, rows = config["seeds"], []
+    seeds, rows = config.seeds, []
 
-    for index, lr in enumerate(config["source_learning_rates"]):
+    for index, lr in enumerate(config.requested.tuning.source_learning_rates):
         candidate = f"source_{index}"
         path = directory / "public_checkpoints" / f"{candidate}.pt"
         row = {"phase": "source", "learning_rate": lr, "candidate_id": candidate}
         try:
-            model = run_public_job(path, context, candidate, build_model(dimension, seeds["tuning_initialization"]),
+            model = run_public_job(path, context, candidate, build_model(dimension, seeds.tuning_initialization),
                 lambda model: pretrain_source(model, source, settings(config, lr),
-                                               generator(seeds["tuning_source_shuffle"])),
+                                               generator(seeds.tuning_source_shuffle)),
                 output / "internal/tuning" / f"{candidate}.pt")
             row.update(status="complete", **score(model, validation))
         except (ValueError, RuntimeError) as error:
@@ -151,8 +180,8 @@ def tune(data_root, output, config_path):
     pretrained, _ = load_checkpoint(directory / "public_checkpoints" / f"{source_choice['candidate_id']}.pt")
     pretrained_state = model_state(pretrained)
 
-    for lr_index, lr in enumerate(config["target_learning_rates"]):
-        for epoch_index, epochs in enumerate(config["target_epoch_candidates"]):
+    for lr_index, lr in enumerate(config.requested.tuning.target_learning_rates):
+        for epoch_index, epochs in enumerate(config.requested.tuning.target_epoch_candidates):
             chosen = settings(config, source_lr, lr, epochs)
             for method_index, method in enumerate(["sgd", "dp_sgd"]):
                 for init_index, init in enumerate(["scratch", "pretrained"]):
@@ -160,11 +189,11 @@ def tune(data_root, output, config_path):
                     row = {"phase": "target", "learning_rate": lr, "target_epochs": epochs,
                            "method": method, "initialization": init, "candidate_id": candidate}
                     try:
-                        model = build_model(dimension, seeds["tuning_initialization"])
+                        model = build_model(dimension, seeds.tuning_initialization)
                         if init == "pretrained":
                             model.load_state_dict(pretrained_state, strict=True)
-                        sampling_seed = seeds["tuning_sampling"] + method_index
-                        noise_seed = seeds["tuning_noise"] + 100 * lr_index + 10 * epoch_index + init_index
+                        sampling_seed = seeds.tuning_sampling + method_index
+                        noise_seed = seeds.tuning_noise + 100 * lr_index + 10 * epoch_index + init_index
                         model = run_public_job(directory / "public_checkpoints" / f"{candidate}.pt",
                             context, candidate, model,
                             lambda model: train_target(model, proxy, chosen, method,
@@ -186,13 +215,8 @@ def tune(data_root, output, config_path):
         "auroc": float(roc_auc_score(validation["y"], probability)),
         "brier": float(brier_score_loss(validation["y"], probability)),
         "iterations": int(logistic.n_iter_[0]), "training_n": len(pool["y"])})
-    selected = settings(config, source_lr, target_choice["learning_rate"], target_choice["target_epochs"])
-    frozen = {**context, "protocol_version": config["protocol_version"], "training_config": config,
-              "settings": selected, "input_dimension": dimension, "candidate_results": rows,
-              "tuning_candidates_sha256": file_hash(directory / "candidates.csv"),
-              "cpu_threads": 1, "deterministic_algorithms": True}
-    atomic_json(output / "frozen_protocol.json", frozen)
-    return frozen
+    selected = SelectedHyperparameters(source_lr, target_choice["learning_rate"], target_choice["target_epochs"])
+    return freeze_settings(data_root, output, config_path, config, selected, rows)
 
 
 def public_smoke(data_root, output, config_path):
@@ -201,20 +225,20 @@ def public_smoke(data_root, output, config_path):
     proxy = load_training_data(data_root, "proxy_train")
     context = public_context(data_root, config_path)
     chosen = settings(config, .01, .01, 8)
-    seeds = config["seeds"]
+    seeds = config.seeds
     directory = Path(output) / "public_smoke"
     model = run_public_job(directory / "source.pt", context, "smoke_source",
-        build_model(source["input_dimension"], seeds["tuning_initialization"]),
-        lambda model: pretrain_source(model, source, chosen, generator(seeds["tuning_source_shuffle"])),
+        build_model(source["input_dimension"], seeds.tuning_initialization),
+        lambda model: pretrain_source(model, source, chosen, generator(seeds.tuning_source_shuffle)),
         Path(output) / "internal/public_smoke/source.pt")
     state = model_state(model)
     for index, method in enumerate(["sgd", "dp_sgd"]):
-        model = build_model(source["input_dimension"], seeds["tuning_initialization"])
+        model = build_model(source["input_dimension"], seeds.tuning_initialization)
         model.load_state_dict(state, strict=True)
         run_public_job(directory / f"{method}.pt", context, f"smoke_{method}", model,
             lambda model: train_target(model, proxy, chosen, method,
-                generator(seeds["tuning_sampling"] + index), generator(seeds["tuning_noise"])),
+                generator(seeds.tuning_sampling + index), generator(seeds.tuning_noise)),
             Path(output) / f"internal/public_smoke/{method}.pt")
-    return {"status": "complete", "source_steps": config["source_epochs"] *
-            int(np.ceil(len(source["y"]) / config["source_batch_size"])),
-            "proxy_steps_per_model": 8 * config["steps_per_epoch"]}
+    return {"status": "complete", "source_steps": config.requested.tuning.source_epochs *
+            int(np.ceil(len(source["y"]) / PROTOCOL.source_batch_size)),
+            "proxy_steps_per_model": 8 * PROTOCOL.steps_per_epoch}

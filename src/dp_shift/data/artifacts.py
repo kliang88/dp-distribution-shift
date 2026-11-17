@@ -11,7 +11,7 @@ from .cohort import build_cohort
 from .preprocessing import transform_features, transformer_metadata
 from .sampling import validate_source_pair
 from .schema import discharge_descriptions, load_and_validate_raw
-from dp_shift.config import PARTITIONS
+from dp_shift.config import PARTITIONS, PROTOCOL, resolve_config
 
 from .splits import read_manifest, rows_for_manifest, validate_splits
 from .utils import file_hash, read_json, require, write_json
@@ -111,25 +111,27 @@ def input_paths(provenance, config):
 
 
 def load_saved_cohort(root):
-    config = read_json(Path(root) / "config.json")
+    saved_config = read_json(Path(root) / "config.json")
+    config = resolve_config(saved_config["experiment"])
     provenance = read_json(Path(root) / "provenance.json")
-    paths = input_paths(provenance, config)
+    paths = input_paths(provenance, saved_config)
     for name, path in paths.items():
-        require(file_hash(path) == config["inputs"][name]["sha256"], f"Input fingerprint mismatch: {name}")
-    protocol = Path(provenance["project_root"]) / config["protocol_path"]
+        require(file_hash(path) == saved_config["inputs"][name]["sha256"], f"Input fingerprint mismatch: {name}")
+    protocol = Path(provenance["project_root"]) / PROTOCOL.protocol_path
     require(file_hash(protocol) == provenance["protocol_sha256"], "Protocol changed since preparation")
-    raw = load_and_validate_raw(paths["records"], config)
-    return build_cohort(raw, config, discharge_descriptions(paths["mapping"]))
+    raw = load_and_validate_raw(paths["records"], config, saved_config["inputs"]["records"]["sha256"])
+    return build_cohort(raw, discharge_descriptions(paths["mapping"]))
 
 
 def verify_artifacts(root):
     """Verify persisted memberships and transforms, without resampling or fitting."""
     root = Path(root)
     complete = check_artifact_files(root)
-    config = read_json(root / "config.json")
+    saved_config = read_json(root / "config.json")
+    config = resolve_config(saved_config["experiment"])
     provenance = read_json(root / "provenance.json")
     require(complete["protocol_sha256"] == provenance["protocol_sha256"], "Protocol metadata mismatch")
-    require(complete["protocol_version"] == config["protocol_version"], "Protocol version mismatch")
+    require(complete["protocol_version"] == saved_config["protocol_version"], "Protocol version mismatch")
     for name in ["numpy", "pandas", "scikit-learn", "joblib"]:
         require(version(name) == provenance["versions"][name], f"Library version changed: {name}")
     cohort, exclusions, audit = load_saved_cohort(root)
@@ -146,7 +148,7 @@ def verify_artifacts(root):
 
     transformer = joblib.load(root / "preprocessing/transformer.joblib")
     metadata = read_json(root / "preprocessing/metadata.json")
-    require(metadata == transformer_metadata(transformer, frames["source_pool"], config),
+    require(metadata == transformer_metadata(transformer, frames["source_pool"]),
             "Fitted preprocessing metadata mismatch")
     for name in TRAIN_PARTITIONS:
         path = root / f"arrays/{name}.npz"
@@ -163,35 +165,36 @@ def verify_artifacts(root):
         }, f"Array provenance mismatch: {name}")
 
     pool = frames["source_pool"]
-    expected_repeats = {f"repeat_{r:02d}" for r in range(config["repeats"])}
+    expected_repeats = {f"repeat_{r:02d}" for r in range(config.requested.repeats)}
     require({p.name for p in (root / "source_pairs").iterdir()} == expected_repeats, "Missing source repeats")
-    for repeat in range(config["repeats"]):
+    for repeat in range(config.requested.repeats):
         directory = root / f"source_pairs/repeat_{repeat:02d}"
         pair = {name: rows_for_manifest(cohort, read_manifest(directory / f"{name}.csv"))
                 for name in ["s0", "s1", "removed", "added"]}
         validate_source_pair(pool, pair, config)
         for name in ["s0", "s1"]:
             indices = np.load(directory / f"{name}_indices.npy", allow_pickle=False)
-            require(indices.dtype == np.int64 and indices.shape == (config["pretrain_size"],),
+            require(indices.dtype == np.int64 and indices.shape == (config.requested.source_conditions.pretrain_size,),
                     f"Invalid source indices: {repeat}/{name}")
             require(((indices >= 0) & (indices < len(pool))).all(), "Source index outside cache")
             require(np.array_equal(pool.patient_nbr.to_numpy()[indices], pair[name].patient_nbr),
                     f"Source cache alignment mismatch: {repeat}/{name}")
     require(not (root / "arrays/target_test.npz").exists(), "Test bundle is in the training directory")
     return {"patients": len(cohort), "input_dimension": metadata["input_dimension"],
-            "source_pairs": config["repeats"], "target_train_n": len(frames["target_train"])}
+            "source_pairs": config.requested.repeats, "target_train_n": len(frames["target_train"])}
 
 
 def load_training_data(root, partition, repeat_id=None):
     """Return model inputs only; identifiers never enter X. Test data are excluded."""
     root = Path(root)
     check_artifact_files(root)
-    config = read_json(root / "config.json")
+    saved_config = read_json(root / "config.json")
+    config = resolve_config(saved_config["experiment"])
     metadata = read_json(root / "preprocessing/metadata.json")
     require(partition in (*TRAIN_PARTITIONS, "s0", "s1"), "Unsupported training partition")
     source = partition in {"s0", "s1"}
     if source:
-        require(isinstance(repeat_id, int) and 0 <= repeat_id < config["repeats"], "Invalid source repeat ID")
+        require(isinstance(repeat_id, int) and 0 <= repeat_id < config.requested.repeats, "Invalid source repeat ID")
     else:
         require(repeat_id is None, "repeat_id is only used for source samples")
     bundle = read_bundle(root / f"arrays/{'source_pool' if source else partition}.npz", metadata["input_dimension"])
@@ -211,8 +214,9 @@ def validate_evaluation_manifest(path, root):
         require(evaluation.get(key) == complete[key], f"Evaluation manifest has a different {key}")
     analysis = evaluation["analysis"]
     require(file_hash(path.parent / analysis["path"]) == analysis["sha256"], "Frozen analysis fingerprint mismatch")
-    config = read_json(root / "config.json")
-    expected = {(repeat, name) for repeat in range(config["repeats"]) for name in PATH_IDS}
+    saved_config = read_json(root / "config.json")
+    config = resolve_config(saved_config["experiment"])
+    expected = {(repeat, name) for repeat in range(config.requested.repeats) for name in PATH_IDS}
     runs = evaluation["runs"]
     actual = {(run["repeat_id"], run["path_id"]) for run in runs}
     require(len(runs) == len(expected) and actual == expected, "Evaluation requires every completed training path")
@@ -228,7 +232,7 @@ def load_evaluation_data(root):
     directory = root / "evaluation"
     complete = read_json(directory / "COMPLETE.json")
     require(complete.get("status") == "complete", "Test preparation is incomplete")
-    expected_files = {"target_test.npz", "target_test.json", "evaluation_ready.json"}
+    expected_files = {"target_test.npz", "target_test.json", "evaluation_ready.json", "characteristics.json"}
     require(set(complete["files"]) == expected_files, "Incomplete evaluation artifact index")
     require({p.name for p in directory.iterdir()} == expected_files | {"COMPLETE.json"},
             "Missing or unexpected evaluation files")

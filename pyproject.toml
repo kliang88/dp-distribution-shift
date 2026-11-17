@@ -14,8 +14,6 @@ dependencies = {file = ["requirements.txt"]}
 
 [project.scripts]
 dp-shift = "dp_shift.cli:main"
-dp-shift-data = "dp_shift.data.prepare:main"
-dp-shift-train = "dp_shift.training.run:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

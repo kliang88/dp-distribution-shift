@@ -1,5 +1,6 @@
 """Run the established training implementation inside the recovery workspace."""
 
+from dataclasses import asdict
 from pathlib import Path
 
 from dp_shift.config import load_config
@@ -8,12 +9,16 @@ from dp_shift.data.utils import read_json, require
 from dp_shift.training.model import configure_cpu
 from dp_shift.training.run import finalize, fit, pretrain
 from dp_shift.training.tune import public_smoke, tune
-from .common import completed, finish, verify, workspace
+from .common import completed, finish, protocol, verify, workspace
 
 
-def run(output, config, progress=print):
+def run(output, config, progress=print, *, selected=None):
     existing = completed(output, "train", config)
     if existing is not None:
+        if selected is not None:
+            saved = protocol(output)["stages"]["train"]["selected"]
+            require(all(saved[key] == value for key, value in asdict(selected).items()),
+                    "Completed training uses different hyperparameters")
         progress("Verified completed training.")
         return existing
     output = Path(output)
@@ -25,8 +30,8 @@ def run(output, config, progress=print):
     verify_artifacts(data)
     progress("Checking ordinary/private compatibility on public data…")
     smoke = public_smoke(data, work, config)
-    progress("Selecting or verifying frozen public tuning settings…")
-    frozen = tune(data, work, config)
+    progress("Freezing shared settings…" if selected is not None else "Selecting or verifying frozen public tuning settings…")
+    frozen = tune(data, work, config, selected=selected)
     repeats = read_json(data / "config.json")["repeats"]
     for repeat in range(repeats):
         progress(f"Repeat {repeat + 1}/{repeats}: source pretraining (S0, S1)…")
@@ -36,11 +41,11 @@ def run(output, config, progress=print):
     progress("Verifying checkpoints, privacy accounting, and evaluation readiness…")
     result = finalize(data, work)
     summary = {key: value for key, value in result.items() if key != "evaluation_ready"}
-    require(load_config(config) == frozen["training_config"], "Training configuration changed during execution")
+    require(load_config(config).to_dict() == frozen["training_config"], "Training configuration changed during execution")
     return finish(output, "train", config, summary, [],
                   resolved=frozen["training_config"],
-                  selected={key: frozen["settings"][key] for key in
-                            ("source_lr", "target_lr", "target_epochs", "noise_multiplier")},
+                  selected={**frozen["selected"], "noise_multiplier": frozen["noise_multiplier"]},
                   candidates=frozen["candidate_results"], smoke=smoke,
-                  logistic_diagnostic=read_json(work / "tuning/logistic_diagnostic.json"),
+                  logistic_diagnostic=(read_json(work / "tuning/logistic_diagnostic.json")
+                                       if (work / "tuning/logistic_diagnostic.json").exists() else None),
                   provenance={key: frozen[key] for key in ("code_hashes", "versions")})

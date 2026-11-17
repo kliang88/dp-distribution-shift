@@ -1,5 +1,6 @@
 """Small checks for optimization, privacy, and checkpoint behavior."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -7,7 +8,8 @@ import pytest
 import torch
 from torch.nn import functional as F
 
-from dp_shift.config import load_config
+from dp_shift.config import PROTOCOL, SelectedHyperparameters, resolve_config
+from dp_shift.sweep import load_plan
 from dp_shift.data.utils import read_json
 from dp_shift.training.checkpoints import execute_job, load_checkpoint, save_checkpoint
 from dp_shift.training.loaders import generator, poisson_loader, source_loader
@@ -15,7 +17,7 @@ from dp_shift.training.model import build_model, configure_cpu, model_state
 from dp_shift.training.privacy import (accounted_steps, calibrate_noise, predicted_epsilon,
                                       private_generators, wrap_private)
 from dp_shift.training.train import make_optimizer, pretrain_source, step_batch, train_target
-from dp_shift.training.tune import best_candidate, best_target_candidate
+from dp_shift.training.tune import best_candidate, best_target_candidate, settings as training_settings
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,12 +30,10 @@ def cpu():
 
 @pytest.fixture
 def settings():
-    config = load_config(ROOT / "configs/experiment.json")
-    config.update(source_lr=.01, target_lr=.01, source_epochs=2, source_batch_size=16,
-                  target_epochs=1, noise_multiplier=calibrate_noise(
-                      1, config["steps_per_epoch"], config["delta"],
-                      config["epsilon_cap"], config["calibration_epsilon"]))
-    return config
+    choices = load_plan(ROOT / "configs/experiment.json")["base"]
+    choices["tuning"]["source_epochs"] = 2
+    config = resolve_config(choices)
+    return training_settings(config, .01, .01, 1)
 
 
 def tiny_data(n=24, d=3):
@@ -69,7 +69,9 @@ def test_source_training_learns_and_keeps_partial_batches(settings):
     model = build_model(3, 1)
     x, y = torch.from_numpy(data["X"]), torch.tensor(data["y"], dtype=torch.float32)
     initial_loss = F.binary_cross_entropy_with_logits(model(x).squeeze(-1), y).item()
-    settings.update(source_lr=.1, source_epochs=30, source_batch_size=65)
+    choices = settings.config.requested.to_dict()
+    choices["tuning"]["source_epochs"] = 30
+    settings = training_settings(resolve_config(choices), .1, .01, 1)
     trained, diagnostic = pretrain_source(model, data, settings, generator(1))
     final_loss = F.binary_cross_entropy_with_logits(trained(x).squeeze(-1), y).item()
     assert final_loss < initial_loss / 2
@@ -132,12 +134,12 @@ def test_private_training_budget_and_rng_permissions(tmp_path, settings):
     assert not torch.equal(first["sampling"], first["noise"])
     assert not torch.equal(first["noise"], second["noise"])
     _, result = train_target(build_model(3, 1), tiny_data(), settings, "dp_sgd", sampling, noise)
-    epsilon = predicted_epsilon(settings["noise_multiplier"], 1/12, 12, settings["delta"])
+    epsilon = predicted_epsilon(settings.noise_multiplier, 1/12, 12, PROTOCOL.delta)
     assert result["steps"] == result["privacy"]["steps"] == 12
     assert result["privacy"]["epsilon_achieved"] == pytest.approx(epsilon)
-    assert epsilon <= settings["epsilon_cap"]
+    assert epsilon <= settings.config.requested.privacy.epsilon
     assert sum(count for _, _, count in result["accountant_state"]["history"]) == 12
-    invalid = {**settings, "noise_multiplier": 0.}
+    invalid = replace(settings, noise_multiplier=0.)
     with pytest.raises(ValueError, match="positive noise"):
         train_target(build_model(3, 1), tiny_data(), invalid, "dp_sgd", generator(1), generator(2))
 
@@ -158,6 +160,30 @@ def test_tuning_ties_and_invalid_candidates():
     assert best_target_candidate(rows)["target_epochs"] == 16
     with pytest.raises(ValueError, match="No valid"):
         best_candidate([source[-1]])
+
+
+def test_provided_hyperparameters_skip_search_and_stay_frozen(experiment, monkeypatch):
+    from dp_shift.training import tune
+
+    data, output, path = experiment
+    requested = read_json(path)
+    selected = SelectedHyperparameters(.01, .01, 1)
+    monkeypatch.setattr(tune, "public_source", lambda *args: pytest.fail("Provided settings must skip tuning"))
+    with pytest.raises(ValueError, match="requires target hyperparameters"):
+        tune.tune(data, output, path, selected=SelectedHyperparameters(.01))
+    assert not output.exists()
+
+    frozen = tune.tune(data, output, path, selected=selected)
+    settings = tune.training_settings(frozen)
+    assert settings.selected == selected
+    assert settings.config == resolve_config(requested)
+    assert read_json(path) == requested
+    assert not (output / "tuning").exists()
+    assert predicted_epsilon(settings.noise_multiplier, 1 / PROTOCOL.steps_per_epoch,
+                             PROTOCOL.steps_per_epoch, PROTOCOL.delta) <= requested["comparisons"]["epsilons"][0]
+    assert tune.tune(data, output, path, selected=selected) == frozen
+    with pytest.raises(ValueError, match="Frozen hyperparameters differ"):
+        tune.tune(data, output, path, selected=replace(selected, target_lr=.03))
 
 
 def test_failed_jobs_are_recorded_and_not_silently_restarted(tmp_path):

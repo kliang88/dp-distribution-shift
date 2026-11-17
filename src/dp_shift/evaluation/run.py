@@ -36,7 +36,7 @@ def verify_analysis(output):
         validate_curves(curves, runs, reference)
         for name, values in expected_curves.items():
             np.testing.assert_allclose(curves[name], values, rtol=1e-12, atol=1e-12)
-    expected = summary_tables(runs, frozen["config"])
+    expected = summary_tables(runs, frozen["config"]["repeats"])
     for name, table in expected.items():
         actual = pd.read_csv(output / name, float_precision="round_trip")
         pd.testing.assert_frame_equal(actual, table, check_dtype=False, check_exact=False, rtol=1e-10, atol=1e-12)

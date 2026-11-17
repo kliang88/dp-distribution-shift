@@ -6,20 +6,20 @@ import numpy as np
 import pandas as pd
 from scipy.stats import t
 
+from dp_shift.config import PROTOCOL
 from dp_shift.data.artifacts import PATH_IDS
 from dp_shift.data.utils import require
 from .metrics import CONDITIONS, METRICS, PAPER_METRICS
-from .provenance import atomic_csv, require_open, verify_scored
 
 
 CONTRASTS = {
-    "ap_gain_sgd_s0": ("Pretraining", "SGD: S0 − scratch"),
-    "ap_gain_sgd_s1": ("Pretraining", "SGD: S1 − scratch"),
-    "ap_gain_dp_s0": ("Pretraining", "DP-SGD: S0 − scratch"),
-    "ap_gain_dp_s1": ("Pretraining", "DP-SGD: S1 − scratch"),
-    "ap_shift_sgd": ("Source shift", "SGD: S1 − S0"),
-    "ap_shift_dp": ("Source shift", "DP-SGD: S1 − S0"),
-    "ap_dp_interaction": ("Interaction", "Source shift: DP-SGD − SGD"),
+    "gain_sgd_baseline": ("Pretraining", "SGD: S0 − scratch"),
+    "gain_sgd_shifted": ("Pretraining", "SGD: S1 − scratch"),
+    "gain_dp_baseline": ("Pretraining", "DP-SGD: S0 − scratch"),
+    "gain_dp_shifted": ("Pretraining", "DP-SGD: S1 − scratch"),
+    "shift_penalty_sgd": ("Shift penalty", "SGD: S0 − S1"),
+    "shift_penalty_dp": ("Shift penalty", "DP-SGD: S0 − S1"),
+    "dp_amplification": ("DP amplification", "Shift penalty: DP-SGD − SGD"),
 }
 
 
@@ -47,26 +47,28 @@ def paired_effects(runs, repeats):
     rows = []
     for repeat, group in runs.groupby("repeat_id", sort=True):
         ap = group.set_index("path_id").average_precision
-        shift_sgd, shift_dp = ap["B-S1"] - ap["B-S0"], ap["D-S1"] - ap["D-S0"]
+        penalty_sgd, penalty_dp = ap["B-S0"] - ap["B-S1"], ap["D-S0"] - ap["D-S1"]
         rows.append({"repeat_id": int(repeat),
-                     "ap_gain_sgd_s0": ap["B-S0"] - ap["A"],
-                     "ap_gain_sgd_s1": ap["B-S1"] - ap["A"],
-                     "ap_gain_dp_s0": ap["D-S0"] - ap["C"],
-                     "ap_gain_dp_s1": ap["D-S1"] - ap["C"],
-                     "ap_shift_sgd": shift_sgd, "ap_shift_dp": shift_dp,
-                     "ap_dp_interaction": shift_dp - shift_sgd})
+                     "gain_sgd_baseline": ap["B-S0"] - ap["A"],
+                     "gain_sgd_shifted": ap["B-S1"] - ap["A"],
+                     "gain_dp_baseline": ap["D-S0"] - ap["C"],
+                     "gain_dp_shifted": ap["D-S1"] - ap["C"],
+                     "shift_penalty_sgd": penalty_sgd, "shift_penalty_dp": penalty_dp,
+                     "dp_amplification": penalty_dp - penalty_sgd})
     return pd.DataFrame(rows)
 
 
 def interval(values, confidence=.95):
     values = np.asarray(values, dtype=float)
-    require(values.ndim == 1 and len(values) >= 2 and np.isfinite(values).all(), "Invalid repeat values")
+    require(values.ndim == 1 and len(values) >= 1 and np.isfinite(values).all(), "Invalid repeat values")
+    if len(values) == 1:
+        return {"n": 1, "mean": float(values[0]), "sd": np.nan, "ci_lower": np.nan, "ci_upper": np.nan}
     mean, sd = float(values.mean()), float(values.std(ddof=1))
     margin = float(t.ppf((1 + confidence) / 2, len(values) - 1) * sd / np.sqrt(len(values)))
     return {"n": len(values), "mean": mean, "sd": sd, "ci_lower": mean - margin, "ci_upper": mean + margin}
 
 
-def classify_interaction(lower, upper, threshold=.005):
+def classify_amplification(lower, upper, threshold=.005):
     require(np.isfinite([lower, upper]).all() and lower <= upper and threshold > 0, "Invalid interval or threshold")
     if upper < -threshold:
         return "negative"
@@ -77,15 +79,15 @@ def classify_interaction(lower, upper, threshold=.005):
     return "inconclusive"
 
 
-def effect_summary(effects, config):
+def effect_summary(effects):
     rows = []
     for name, (group, label) in CONTRASTS.items():
-        summary = interval(effects[name], config["confidence_level"])
+        summary = interval(effects[name], PROTOCOL.confidence_level)
         interpretation = np.nan
-        if name == "ap_dp_interaction":
-            interpretation = classify_interaction(summary["ci_lower"], summary["ci_upper"], config["practical_ap_threshold"])
-        elif name in {"ap_gain_sgd_s0", "ap_gain_dp_s0"}:
-            interpretation = "useful" if summary["ci_lower"] > config["practical_ap_threshold"] else "not_established"
+        if summary["n"] > 1 and name == "dp_amplification":
+            interpretation = classify_amplification(summary["ci_lower"], summary["ci_upper"], PROTOCOL.practical_ap_threshold)
+        elif summary["n"] > 1 and name in {"gain_sgd_baseline", "gain_dp_baseline"}:
+            interpretation = "useful" if summary["ci_lower"] > PROTOCOL.practical_ap_threshold else "not_established"
         rows.append({"effect": name, "group": group, "contrast": label, **summary,
                      "interpretation": interpretation})
     return pd.DataFrame(rows)
@@ -103,16 +105,18 @@ def metric_summary(runs):
     return pd.DataFrame(rows)
 
 
-def summary_tables(runs, config):
-    effects = paired_effects(runs, config["repeats"])
-    return {"metrics.csv": metric_summary(runs), "effects.csv": effect_summary(effects, config)}
+def summary_tables(runs, repeats):
+    effects = paired_effects(runs, repeats)
+    return {"metrics.csv": metric_summary(runs), "effects.csv": effect_summary(effects)}
 
 
 def summarize(output):
+    from .provenance import atomic_csv, require_open, verify_scored
+
     output = Path(output)
     require_open(output)
     frozen = verify_scored(output)
     runs = pd.read_csv(output / "runs.csv", float_precision="round_trip")
-    for name, frame in summary_tables(runs, frozen["config"]).items():
+    for name, frame in summary_tables(runs, frozen["config"]["repeats"]).items():
         atomic_csv(output / name, frame)
     return {"summarized_models": len(runs), "paired_repeats": frozen["config"]["repeats"]}

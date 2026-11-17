@@ -1,6 +1,7 @@
 """Tests of cohort validity, leakage prevention, and saved-data integrity."""
 
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import shutil
 
@@ -9,7 +10,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from dp_shift.config import load_config
+from dp_shift.config import PROTOCOL, resolve_config
+from dp_shift.sweep import load_plan
 from dp_shift.data.artifacts import (PATH_IDS, load_evaluation_data, load_training_data,
                                      validate_evaluation_manifest, verify_artifacts)
 from dp_shift.data.cohort import build_cohort
@@ -28,16 +30,14 @@ CONFIG_PATH = ROOT / "configs/experiment.json"
 
 @pytest.fixture
 def config():
-    config = load_config(CONFIG_PATH)
-    config["inputs"] = {"records": {"sha256": file_hash(ROOT / "data/diabetic_data.csv")}}
-    return config
+    return resolve_config(load_plan(CONFIG_PATH)["base"])
 
 
 def make_frame(n, config):
     frame = pd.DataFrame({name: np.arange(n, dtype=float) + i
-                          for i, name in enumerate(config["numeric_features"])})
-    for name in config["categorical_features"]:
-        frame[name] = "1" if name in config["categorical_ids"] else "known"
+                          for i, name in enumerate(list(PROTOCOL.numeric_features))})
+    for name in PROTOCOL.categorical_features:
+        frame[name] = "1" if name in PROTOCOL.categorical_ids else "known"
     frame["patient_nbr"] = np.arange(n, dtype=np.int64) + 1
     frame["encounter_id"] = np.arange(n, dtype=np.int64) + 1000
     frame["y"] = (np.arange(n) % 3 == 0).astype(np.int64)
@@ -55,7 +55,7 @@ def test_index_selection_precedes_exclusion(config):
     frame["patient_nbr"] = [1, 1, 2, 2]
     frame["encounter_id"] = [10, 20, 30, 40]
     frame["discharge_disposition_id"] = ["11", "1", "1", "1"]
-    cohort, excluded, _ = build_cohort(frame.sample(frac=1, random_state=10), config)
+    cohort, excluded, _ = build_cohort(frame.sample(frac=1, random_state=10))
     assert cohort.patient_nbr.tolist() == [2]
     assert cohort.encounter_id.tolist() == [30]
     assert excluded.patient_nbr.tolist() == [1]
@@ -68,8 +68,7 @@ def test_raw_parser_preserves_large_integer_ids_and_literal_categories(tmp_path,
     frame["admission_type_id"] = ["1.0", "2"]
     path = tmp_path / "records.csv"
     save_raw(frame, path)
-    config["inputs"]["records"]["sha256"] = file_hash(path)
-    result = load_and_validate_raw(path, config)
+    result = load_and_validate_raw(path, config, file_hash(path))
     assert result.patient_nbr.tolist() == frame.patient_nbr.tolist()
     assert result.admission_type_id.tolist() == ["1", "2"]
     assert result.race.iloc[0] == "None" and pd.isna(result.race.iloc[1])
@@ -91,34 +90,34 @@ def test_raw_parser_rejects_invalid_data(tmp_path, config, column, value, error)
     frame = pd.read_csv(path, dtype=str)
     frame.loc[1, column] = value
     frame.to_csv(path, index=False)
-    config["inputs"]["records"]["sha256"] = file_hash(path)
     with pytest.raises(ValueError, match=error):
-        load_and_validate_raw(path, config)
+        load_and_validate_raw(path, config, file_hash(path))
 
 
 def test_raw_fingerprint_and_duplicate_headers(tmp_path, config):
     path = tmp_path / "records.csv"
     save_raw(make_frame(2, config), path)
     with pytest.raises(ValueError, match="fingerprint"):
-        load_and_validate_raw(path, config)
+        load_and_validate_raw(path, config, "wrong fingerprint")
     lines = path.read_text().splitlines()
     path.write_text(lines[0] + ",patient_nbr\n" + "\n".join(line + ",1" for line in lines[1:]) + "\n")
-    config["inputs"]["records"]["sha256"] = file_hash(path)
     with pytest.raises(ValueError, match="Duplicate CSV column"):
-        load_and_validate_raw(path, config)
+        load_and_validate_raw(path, config, file_hash(path))
 
 
 def test_source_pair_replaces_positives_without_changing_size(config):
     pool = make_frame(100, config)
-    config.update(pretrain_size=20, source_positive_n=1)
+    choices = config.requested.to_dict()
+    choices["source_conditions"].update(pretrain_size=20, shift_fraction=.05)
+    config = resolve_config(choices)
     first = create_source_pair(pool, 0, config)
     second = create_source_pair(pool, 0, config)
     assert len(first["s1"]) == 20 and first["s1"].y.sum() == 1
     assert first["removed"].y.eq(1).all() and first["added"].y.eq(0).all()
     for name in first:
         pd.testing.assert_frame_equal(first[name], second[name])
-    config["source_positive_n"] = 20
-    with pytest.raises(ValueError, match="more positives"):
+    config = replace(config, shift_member_count=20)
+    with pytest.raises(ValueError, match="both classes"):
         create_source_pair(pool, 0, config)
 
 
@@ -126,14 +125,14 @@ def test_preprocessing_uses_source_statistics_and_survives_unseen_categories(tmp
     source = make_frame(4, config)
     source["number_outpatient"] = [0., 1., 3., 7.]
     source.loc[0, "time_in_hospital"] = np.nan
-    transformer = fit_source_transformer(source, config)
-    before = deepcopy(transformer_metadata(transformer, source, config))
+    transformer = fit_source_transformer(source)
+    before = deepcopy(transformer_metadata(transformer, source))
     # Compute the expected statistics independently in the prescribed order.
-    values = source[config["numeric_features"]].to_numpy().copy()
+    values = source[list(PROTOCOL.numeric_features)].to_numpy().copy()
     medians = np.nanmedian(values, axis=0)
     values = np.where(np.isnan(values), medians, values)
-    for name in config["log_features"]:
-        index = config["numeric_features"].index(name)
+    for name in PROTOCOL.log_features:
+        index = list(PROTOCOL.numeric_features).index(name)
         values[:, index] = np.log1p(values[:, index])
     np.testing.assert_allclose(before["medians"], medians)
     np.testing.assert_allclose(before["means"], values.mean(axis=0))
@@ -146,12 +145,12 @@ def test_preprocessing_uses_source_statistics_and_survives_unseen_categories(tmp
     target.loc[1, "number_outpatient"] = np.nan
     transformed = transform_features(transformer, target)
     assert np.isfinite(transformed).all() and transformed.shape[1] == before["input_dimension"]
-    assert transformer_metadata(transformer, source, config) == before
+    assert transformer_metadata(transformer, source) == before
     joblib.dump(transformer, tmp_path / "transformer.joblib")
     np.testing.assert_array_equal(transformed, transform_features(joblib.load(tmp_path / "transformer.joblib"), target))
     source["num_medications"] = np.nan
     with pytest.raises(ValueError, match="entire source numerical"):
-        fit_source_transformer(source, config)
+        fit_source_transformer(source)
 
 
 def test_manifest_lookup_aligns_rows_by_id(config):
@@ -168,16 +167,18 @@ def test_manifest_lookup_aligns_rows_by_id(config):
 @pytest.fixture(scope="module")
 def prepared(tmp_path_factory):
     output = tmp_path_factory.mktemp("real_data") / "prepared"
-    summary = build(CONFIG_PATH, output)
+    path = output.parent / "config.json"
+    write_json(path, load_plan(CONFIG_PATH)["base"])
+    summary = build(path, output)
     return output, summary
 
 
 def test_real_data_build_and_reproducibility(prepared, tmp_path):
     output, summary = prepared
-    choices = read_json(CONFIG_PATH)
+    choices = load_plan(CONFIG_PATH)["base"]
     repeats = choices["repeats"]
     source = choices["source_conditions"]
-    expected_positive_n = round(source["pretrain_size"] * source["shifted_positive_rate"])
+    expected_positive_n = round(source["pretrain_size"] * source["shift_fraction"])
     preprocessing = read_json(output / "preprocessing/metadata.json")
     expected_dimension = len(preprocessing["numeric_features"]) + sum(
         len(categories) for categories in preprocessing["categories"].values())
@@ -191,7 +192,7 @@ def test_real_data_build_and_reproducibility(prepared, tmp_path):
     np.testing.assert_allclose(numeric.std(axis=0, dtype=np.float64), 1, atol=1e-6)
     # An independent build checks repeatability of manifests and encoded arrays.
     second = tmp_path / "rebuilt"
-    assert build(CONFIG_PATH, second) == summary
+    assert build(output.parent / "config.json", second) == summary
     for name in ["source_pool", "proxy_train", "proxy_validation", "target_train"]:
         first_bundle = load_training_data(output, name)
         other_bundle = load_training_data(second, name)
@@ -207,7 +208,7 @@ def test_real_data_build_and_reproducibility(prepared, tmp_path):
         for name in ["s0", "s1", "removed", "added"]:
             relative = f"source_pairs/repeat_{repeat:02d}/{name}.csv"
             assert (output / relative).read_bytes() == (second / relative).read_bytes()
-    assert build(CONFIG_PATH, output) == summary  # Existing matching artifacts are reused.
+    assert build(output.parent / "config.json", output) == summary  # Existing matching artifacts are reused.
 
 
 def test_artifact_corruption_and_incomplete_output_are_rejected(prepared, tmp_path):
@@ -235,11 +236,11 @@ def synthetic_project(tmp_path, config):
     save_raw(make_frame(400, config), records)
     mapping = tmp_path / "data/mapping.csv"
     mapping.write_text("discharge_disposition_id,description\n1,Home\n")
-    experiment = config["experiment"]
+    experiment = config.requested.to_dict()
     experiment["repeats"] = 2
     experiment["data"] = dict(source_pool_size=200, proxy_train_size=24, proxy_validation_size=40,
                               target_train_size=24, target_test_size=32)
-    experiment["source_conditions"] = dict(pretrain_size=40, shifted_positive_rate=.05)
+    experiment["source_conditions"] = dict(pretrain_size=40, shift_type="readmission", shift_fraction=.05)
     path = tmp_path / "configs/test.json"
     write_json(path, experiment)
     output = tmp_path / "prepared"
@@ -286,7 +287,7 @@ def test_changed_config_and_failed_build_do_not_overwrite_output(synthetic_proje
     config_path = directory / "configs/test.json"
     config = read_json(config_path)
     original_marker = (output / "COMPLETE.json").read_bytes()
-    config["source_conditions"]["shifted_positive_rate"] = .10
+    config["source_conditions"]["shift_fraction"] = .10
     write_json(config_path, config)
     with pytest.raises(ValueError, match="different configuration"):
         build(config_path, output, directory / "data/records.csv", directory / "data/mapping.csv")

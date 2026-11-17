@@ -9,13 +9,14 @@ import os
 import pandas as pd
 
 from dp_shift.data.artifacts import load_training_data, validate_evaluation_manifest, verify_artifacts
+from dp_shift.config import PROTOCOL
 from dp_shift.data.utils import file_hash, read_json, require
 from .checkpoints import atomic_json, completed_job, execute_job, load_checkpoint
 from .loaders import generator
 from .model import build_model, configure_cpu, model_state, state_hash
 from .privacy import predicted_epsilon, private_generators
 from .train import pretrain_source, train_target
-from .tune import load_frozen, public_smoke, tune
+from .tune import load_frozen, public_smoke, training_settings, tune
 
 
 PATHS = {"A": ("sgd", None), "B-S0": ("sgd", "s0"), "B-S1": ("sgd", "s1"),
@@ -39,34 +40,34 @@ def target_path(output, repeat, path_id):
 
 
 def source_metadata(data_root, output, frozen, repeat, condition, n, positive_n):
-    config = frozen["settings"]
-    initial = build_model(frozen["input_dimension"], config["seeds"]["initialization"] + repeat)
+    settings = training_settings(frozen)
+    initial = build_model(frozen["input_dimension"], settings.config.seeds.initialization + repeat)
     return {**base_metadata(data_root, output, frozen), "stage": "source", "repeat_id": repeat,
             "path_id": f"pretrain_{condition}", "source_condition": condition, "source_n": int(n),
             "source_positive_n": int(positive_n), "source_positive_rate": positive_n / n,
             "source_membership_sha256": file_hash(Path(data_root) / f"source_pairs/repeat_{repeat:02d}/{condition}.csv"),
             "initial_state_sha256": state_hash(model_state(initial)),
-            "scheduled_steps": config["source_epochs"] * math.ceil(n / config["source_batch_size"]),
-            "pretraining_lr": config["source_lr"]}
+            "scheduled_steps": settings.config.requested.tuning.source_epochs * math.ceil(n / PROTOCOL.source_batch_size),
+            "pretraining_lr": settings.selected.source_lr}
 
 
 def pretrain(data_root, output, repeats):
     frozen = load_frozen(data_root, output)
-    chosen = frozen["settings"]
+    chosen = training_settings(frozen)
     for repeat in repeats:
         for condition in ["s0", "s1"]:
             data = load_training_data(data_root, condition, repeat)
             metadata = source_metadata(data_root, output, frozen, repeat, condition,
                                        len(data["y"]), int(data["y"].sum()))
-            model = build_model(frozen["input_dimension"], chosen["seeds"]["initialization"] + repeat)
+            model = build_model(frozen["input_dimension"], chosen.config.seeds.initialization + repeat)
             execute_job(source_path(output, repeat, condition), metadata,
-                lambda: pretrain_source(model, data, chosen, generator(chosen["seeds"]["source_shuffle"] + repeat)),
+                lambda: pretrain_source(model, data, chosen, generator(chosen.config.seeds.source_shuffle + repeat)),
                 Path(output) / f"internal/pretraining/repeat_{repeat:02d}/{condition}.pt")
     return {"source_jobs_complete": 2 * len(repeats)}
 
 
 def target_metadata(data_root, output, frozen, repeat, path_id, initial_state, target_n, source_info=None):
-    chosen = frozen["settings"]
+    chosen = training_settings(frozen)
     method, condition = PATHS[path_id]
     return {**base_metadata(data_root, output, frozen), "stage": "target", "repeat_id": repeat,
             "path_id": path_id, "training_method": method,
@@ -77,22 +78,22 @@ def target_metadata(data_root, output, frozen, repeat, path_id, initial_state, t
             "source_checkpoint_sha256": file_hash(source_path(output, repeat, condition)) if condition else None,
             "initial_state_sha256": state_hash(initial_state), "target_train_n": target_n,
             "target_membership_sha256": file_hash(Path(data_root) / "manifests/target_train.csv"),
-            "pretraining_lr": chosen["source_lr"] if condition else None,
-            "target_lr": chosen["target_lr"], "target_epochs": chosen["target_epochs"],
-            "sampling_rate": 1 / chosen["steps_per_epoch"],
-            "scheduled_steps": chosen["target_epochs"] * chosen["steps_per_epoch"]}
+            "pretraining_lr": chosen.selected.source_lr if condition else None,
+            "target_lr": chosen.selected.target_lr, "target_epochs": chosen.selected.target_epochs,
+            "sampling_rate": 1 / PROTOCOL.steps_per_epoch,
+            "scheduled_steps": chosen.selected.target_epochs * PROTOCOL.steps_per_epoch}
 
 
 def fit(data_root, output, repeats):
     frozen = load_frozen(data_root, output)
-    chosen = frozen["settings"]
+    chosen = training_settings(frozen)
     target = load_training_data(data_root, "target_train")
     private_root = Path(output) / "private_rng"
     private_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(private_root, 0o700)
     try:
         for repeat in repeats:
-            initial = model_state(build_model(frozen["input_dimension"], chosen["seeds"]["initialization"] + repeat))
+            initial = model_state(build_model(frozen["input_dimension"], chosen.config.seeds.initialization + repeat))
             sources = {}
             for condition in ["s0", "s1"]:
                 path = source_path(output, repeat, condition)
@@ -106,12 +107,12 @@ def fit(data_root, output, repeats):
                                            len(target["y"]), sources[condition][1] if condition else None)
 
                 def train():
-                    model = build_model(frozen["input_dimension"], chosen["seeds"]["initialization"] + repeat)
+                    model = build_model(frozen["input_dimension"], chosen.config.seeds.initialization + repeat)
                     model.load_state_dict(state, strict=True)
                     if method == "dp_sgd":
                         sampling, noise = private_generators(private_root / f"repeat_{repeat:02d}/{path_id}.pt")
                     else:
-                        sampling, noise = generator(chosen["seeds"]["target_sampling"] + repeat), None
+                        sampling, noise = generator(chosen.config.seeds.target_sampling + repeat), None
                     return train_target(model, target, chosen, method, sampling, noise)
 
                 execute_job(target_path(output, repeat, path_id), metadata, train,
@@ -149,13 +150,13 @@ def write_training_ledger(data_root, output):
 
 def verify_training(data_root, output):
     frozen = load_frozen(data_root, output)
-    chosen = frozen["settings"]
+    chosen = training_settings(frozen)
     config = read_json(Path(data_root) / "config.json")
     audit = pd.read_csv(Path(data_root) / "audit/source_pair_summary.csv")
     target_n = len(pd.read_csv(Path(data_root) / "manifests/target_train.csv"))
-    epsilon = predicted_epsilon(chosen["noise_multiplier"], 1 / chosen["steps_per_epoch"],
-                                chosen["target_epochs"] * chosen["steps_per_epoch"], chosen["delta"])
-    require(epsilon <= chosen["epsilon_cap"], "Frozen schedule exceeds the privacy cap")
+    epsilon = predicted_epsilon(chosen.noise_multiplier, 1 / PROTOCOL.steps_per_epoch,
+                                chosen.selected.target_epochs * PROTOCOL.steps_per_epoch, PROTOCOL.delta)
+    require(epsilon <= chosen.config.requested.privacy.epsilon, "Frozen schedule exceeds the privacy cap")
     for repeat in range(config["repeats"]):
         sources = {}
         for condition in ["s0", "s1"]:
@@ -165,7 +166,7 @@ def verify_training(data_root, output):
             require(completed_job(path, expected), f"Missing source job: {path}")
             sources[condition] = load_checkpoint(path, expected)
             require(sources[condition][1]["steps"] == expected["scheduled_steps"], "Source step count mismatch")
-        initial = model_state(build_model(frozen["input_dimension"], chosen["seeds"]["initialization"] + repeat))
+        initial = model_state(build_model(frozen["input_dimension"], chosen.config.seeds.initialization + repeat))
         for path_id, (method, condition) in PATHS.items():
             state = model_state(sources[condition][0]) if condition else initial
             expected = target_metadata(data_root, output, frozen, repeat, path_id, state, target_n,
@@ -177,8 +178,8 @@ def verify_training(data_root, output):
             privacy = metadata["privacy"]
             if method == "dp_sgd":
                 require(privacy is not None and privacy["accountant"] == "prv", "Missing PRV accountant")
-                for key, value in {"noise_multiplier": chosen["noise_multiplier"], "delta": chosen["delta"],
-                    "clipping_norm": chosen["clipping_norm"], "sampling_rate": 1 / chosen["steps_per_epoch"],
+                for key, value in {"noise_multiplier": chosen.noise_multiplier, "delta": PROTOCOL.delta,
+                    "clipping_norm": chosen.config.requested.privacy.clipping_norm, "sampling_rate": 1 / PROTOCOL.steps_per_epoch,
                     "steps": expected["scheduled_steps"]}.items():
                     require(privacy[key] == value, f"Privacy {key} mismatch: {path_id}")
                 require(abs(privacy["epsilon_achieved"] - epsilon) <= 1e-6, "Accountant epsilon mismatch")
@@ -237,7 +238,7 @@ def main():
             result = public_smoke(args.data, args.output, args.config)
         elif args.command == "tune":
             frozen = tune(args.data, args.output, args.config)
-            result = {key: frozen["settings"][key] for key in ["source_lr", "target_lr", "target_epochs", "noise_multiplier"]}
+            result = {**frozen["selected"], "noise_multiplier": frozen["noise_multiplier"]}
         else:
             result = (verify_training if args.command == "verify" else finalize)(args.data, args.output)
     except (ValueError, OSError, KeyError, RuntimeError, AssertionError) as error:

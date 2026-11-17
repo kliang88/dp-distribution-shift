@@ -13,7 +13,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from dp_shift.config import DEFAULT_CONFIG, load_config
+from dp_shift.config import DEFAULT_CONFIG, PROTOCOL, load_config
 
 from .artifacts import (TRAIN_PARTITIONS, input_paths, load_evaluation_data, load_saved_cohort,
                         save_bundle, validate_evaluation_manifest, verify_artifacts, write_artifact_index)
@@ -22,6 +22,7 @@ from .cohort import build_cohort, describe
 from .preprocessing import fit_source_transformer, transformer_metadata
 from .sampling import create_source_pair
 from .schema import discharge_descriptions, load_and_validate_raw
+from .shifts import describe as characteristics
 from .splits import create_split_manifests, manifest, read_manifest, rows_for_manifest
 from .utils import file_hash, read_json, require, write_json
 
@@ -39,12 +40,12 @@ def implementation_hash():
     return digest.hexdigest()
 
 
-def provenance(config_path, config):
+def provenance(config_path):
     project = Path.cwd()
     return {
         "project_root": str(project),
         "config_source_sha256": file_hash(config_path),
-        "protocol_sha256": file_hash(project / config["protocol_path"]),
+        "protocol_sha256": file_hash(project / PROTOCOL.protocol_path),
         "implementation_sha256": implementation_hash(),
         "versions": {"python": platform.python_version(), **{
             name: version(name) for name in ["numpy", "pandas", "scikit-learn", "scipy", "joblib"]}},
@@ -63,23 +64,23 @@ def input_fingerprints(records=None, mapping=None):
 def build(config_path, output, records=None, mapping=None):
     config_path, output = Path(config_path).resolve(), Path(output).resolve()
     config = load_config(config_path)
-    config["inputs"] = input_fingerprints(records, mapping)
-    info = provenance(config_path, config)
+    snapshot = {**config.to_dict(), "inputs": input_fingerprints(records, mapping)}
+    info = provenance(config_path)
     if output.exists():
-        require(read_json(output / "config.json") == config, "Existing output uses a different configuration")
+        require(read_json(output / "config.json") == snapshot, "Existing output uses a different configuration")
         require(read_json(output / "provenance.json")["implementation_sha256"] == info["implementation_sha256"],
                 "Existing output uses different preparation code; use a new output directory")
         return verify_artifacts(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f".{output.name}-", dir=output.parent) as temporary:
         staging = Path(temporary)
-        paths = input_paths(info, config)
+        paths = input_paths(info, snapshot)
         for name, path in paths.items():
-            require(file_hash(path) == config["inputs"][name]["sha256"], f"Input fingerprint mismatch: {name}")
-        raw = load_and_validate_raw(paths["records"], config)
-        cohort, exclusions, cohort_audit = build_cohort(raw, config, discharge_descriptions(paths["mapping"]))
+            require(file_hash(path) == snapshot["inputs"][name]["sha256"], f"Input fingerprint mismatch: {name}")
+        raw = load_and_validate_raw(paths["records"], config, snapshot["inputs"]["records"]["sha256"])
+        cohort, exclusions, cohort_audit = build_cohort(raw, discharge_descriptions(paths["mapping"]))
         frames = create_split_manifests(cohort, config)
-        write_json(staging / "config.json", config)
+        write_json(staging / "config.json", snapshot)
         write_json(staging / "provenance.json", info)
         write_json(staging / "cohort_audit.json", cohort_audit)
         exclusions.to_csv(staging / "exclusions.csv", index=False)
@@ -88,11 +89,11 @@ def build(config_path, output, records=None, mapping=None):
             manifest(frame).to_csv(staging / f"manifests/{name}.csv", index=False)
 
         pool = frames["source_pool"]
-        tuning_source = pool.sample(n=config["pretrain_size"], random_state=config["seeds"]["tuning_sample"])
+        tuning_source = pool.sample(n=config.requested.source_conditions.pretrain_size, random_state=config.seeds.tuning_sample)
         require(set(tuning_source.y) == {0, 1}, "Public tuning source sample must contain both classes")
         lookup = pd.Series(np.arange(len(pool), dtype=np.int64), index=pool.patient_nbr)
         pairs = []
-        for repeat in range(config["repeats"]):
+        for repeat in range(config.requested.repeats):
             pair = create_source_pair(pool, repeat, config)
             pairs.append(pair)
             directory = staging / f"source_pairs/repeat_{repeat:02d}"
@@ -102,11 +103,11 @@ def build(config_path, output, records=None, mapping=None):
                 if name in {"s0", "s1"}:
                     np.save(directory / f"{name}_indices.npy", lookup.loc[frame.patient_nbr].to_numpy(dtype=np.int64))
 
-        transformer = fit_source_transformer(pool, config)
+        transformer = fit_source_transformer(pool)
         transformer_path = staging / "preprocessing/transformer.joblib"
         transformer_path.parent.mkdir()
         joblib.dump(transformer, transformer_path)
-        write_json(staging / "preprocessing/metadata.json", transformer_metadata(transformer, pool, config))
+        write_json(staging / "preprocessing/metadata.json", transformer_metadata(transformer, pool))
         for name in TRAIN_PARTITIONS:
             save_bundle(staging / f"arrays/{name}.npz", frames[name], transformer,
                         staging / f"manifests/{name}.csv", transformer_path)
@@ -139,6 +140,7 @@ def materialize_test(output, evaluation_manifest):
     with tempfile.TemporaryDirectory(prefix=".evaluation-", dir=output) as temporary:
         staging = Path(temporary)
         write_json(staging / "evaluation_ready.json", ready)
+        write_json(staging / "characteristics.json", characteristics(frame))
         save_bundle(staging / "target_test.npz", frame, transformer,
                     output / "manifests/target_test.csv", transformer_path)
         write_json(staging / "COMPLETE.json", {

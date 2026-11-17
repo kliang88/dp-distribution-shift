@@ -1,6 +1,7 @@
 """Experiment choices, cross-field constraints, and exact patient allocations."""
 
 from copy import deepcopy
+from dataclasses import FrozenInstanceError, asdict, replace
 import json
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import pandas as pd
 import pytest
 
 from dp_shift.cli import main
-from dp_shift.config import PARTITIONS, load_config, resolve_config
+from dp_shift.config import PARTITIONS, PROTOCOL, load_config, resolve_config, study_plan
 from dp_shift.data.sampling import create_source_pair
 from dp_shift.data.splits import create_split_manifests
 from dp_shift.data.utils import read_json
@@ -20,27 +21,36 @@ CONFIG = Path(__file__).resolve().parents[1] / "configs/experiment.json"
 
 @pytest.fixture
 def choices():
-    return read_json(CONFIG)
+    result = read_json(CONFIG)
+    result["comparisons"] = {"shifts": {"readmission": [.01]}, "epsilons": [5.]}
+    return result
 
 
 @pytest.mark.parametrize("path,value,message", [
+    (("schema_version",), True, "schema_version"),
+    (("schema_version",), 2, "schema_version"),
     (("lambda",), 1, "unknown keys"),
     (("privacy", "epslion"), 8, "unknown keys"),
     (("seed",), True, "seed must be"),
     (("seed",), -1, "seed must be"),
     (("seed",), 2**32, "seed must be"),
-    (("repeats",), 1, "at least 2"),
+    (("repeats",), 0, "positive integer"),
     (("data", "source_pool_size"), 0, "positive integer"),
     (("data", "target_train_size"), 3001, "divisible by 12"),
     (("data", "proxy_train_size"), 3001, "divisible by 12"),
     (("data", "source_pool_size"), 16000, "must exceed pretrain_size"),
-    (("source_conditions", "pretrain_size"), 16001, "must be an integer"),
-    (("source_conditions", "shifted_positive_rate"), 1, "below 1"),
-    (("source_conditions", "shifted_positive_rate"), 0, "positive finite"),
-    (("privacy", "epsilon"), float("nan"), "positive finite"),
-    (("privacy", "epsilon"), -1, "positive finite"),
+    (("pretraining", "sample_size"), 16001, "must be an integer"),
+    (("comparisons", "shifts", "readmission"), [1], "below 1"),
+    (("comparisons", "shifts", "readmission"), [0], "positive finite"),
+    (("comparisons", "shifts"), {"unknown": [.1]}, "Unknown shift type"),
+    (("comparisons", "epsilons"), [float("nan")], "positive finite"),
+    (("comparisons", "epsilons"), [-1], "positive finite"),
+    (("comparisons", "epsilons"), [5, -1], "positive finite"),
+    (("comparisons", "shifts", "readmission"), [.01, .010001], "must be an integer"),
+    (("comparisons", "shifts"), {}, "nonempty object"),
+    (("comparisons", "shifts", "readmission"), .01, "nonempty list"),
     (("privacy", "clipping_norm"), 0, "positive finite"),
-    (("tuning", "source_epochs"), 1.5, "positive integer"),
+    (("pretraining", "epochs"), 1.5, "positive integer"),
     (("tuning", "target_epoch_candidates"), [0], "positive integer"),
     (("tuning", "target_learning_rates"), [], "nonempty list"),
     (("tuning", "source_learning_rates"), [.01, .01], "duplicates"),
@@ -54,40 +64,65 @@ def test_invalid_choices_fail_before_output_creation(choices, path, value, messa
     config, output = tmp_path / "experiment.json", tmp_path / "output"
     config.write_text(json.dumps(choices))
     with pytest.raises(SystemExit) as error:
-        main(["all", "--config", str(config), "--output", str(output)])
+        main(["experiment", "--config", str(config), "--output", str(output)])
     assert error.value.code == 1
     assert message in capsys.readouterr().err
     assert not output.exists()
 
 
 def test_missing_choice_is_rejected(choices):
-    del choices["privacy"]["epsilon"]
-    with pytest.raises(ValueError, match="missing keys.*epsilon"):
+    del choices["comparisons"]["epsilons"]
+    with pytest.raises(ValueError, match="missing keys.*epsilons"):
         resolve_config(choices)
 
 
-def test_defaults_and_seeds_are_resolved_without_mutating_choices(choices):
+def test_single_and_multiple_comparisons_use_the_same_schema(choices):
+    single = study_plan(choices)
+    expanded = deepcopy(choices)
+    expanded["comparisons"] = {"shifts": {"readmission": [.01, .04], "age_70_plus": [.5]}, "epsilons": [1., 5.]}
+    multiple = study_plan(expanded)
+    assert single["base"]["data"] == multiple["base"]["data"]
+    assert single["base"]["tuning"] == multiple["base"]["tuning"]
+    assert single["sweep"] == {"shifts": {"readmission": [.01]}, "epsilons": [5.], "reference_epsilon": 5.}
+    assert sum(map(len, multiple["sweep"]["shifts"].values())) * len(multiple["sweep"]["epsilons"]) == 6
+    with pytest.raises(ValueError, match="requires one comparison"):
+        resolve_config(expanded)
+
+
+def test_defaults_and_seeds_are_resolved_without_mutating_choices(choices, tmp_path):
     original = deepcopy(choices)
     first = resolve_config(choices)
     assert choices == original
-    assert first == load_config(CONFIG)
-    source = choices["source_conditions"]
-    assert first["source_positive_n"] == round(source["pretrain_size"] * source["shifted_positive_rate"])
-    assert first["calibration_epsilon"] == pytest.approx(choices["privacy"]["epsilon"] * (7.99 / 8))
-    assert first["source_epochs"] == choices["tuning"]["source_epochs"]
-    assert first["steps_per_epoch"] == 12
-    assert len(set(first["seeds"].values())) == len(first["seeds"])
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(choices))
+    assert first == load_config(path)
+    assert first.shift_member_count == round(choices["pretraining"]["sample_size"] * .01)
+    assert first.calibration_epsilon == pytest.approx(5. * (7.99 / 8))
+    assert first.requested.tuning.source_epochs == choices["pretraining"]["epochs"]
+    assert PROTOCOL.steps_per_epoch == 12
+    assert len(set(asdict(first.seeds).values())) == len(asdict(first.seeds))
     choices["seed"] += 1
     second = resolve_config(choices)
-    assert all(first["seeds"][role] != second["seeds"][role] for role in first["seeds"])
-    first["numeric_features"].clear()
-    assert resolve_config(original)["numeric_features"]
+    assert all(getattr(first.seeds, role) != getattr(second.seeds, role) for role in asdict(first.seeds))
+    snapshot = first.to_dict()
+    assert resolve_config(snapshot["experiment"]) == first
+    snapshot["numeric_features"].clear()
+    snapshot["experiment"]["tuning"]["source_learning_rates"].clear()
+    assert first.requested.tuning.source_learning_rates
+    assert PROTOCOL.numeric_features
+    with pytest.raises(FrozenInstanceError):
+        first.shift_member_count = 0
+    with pytest.raises(FrozenInstanceError):
+        first.requested.privacy.epsilon = 10
+    with pytest.raises(TypeError):
+        first.requested.tuning.source_learning_rates[0] = 10
 
 
 def small_config(choices):
     choices["data"] = dict(source_pool_size=200, proxy_train_size=24,
                             proxy_validation_size=40, target_train_size=24, target_test_size=40)
-    choices["source_conditions"] = dict(pretrain_size=40, shifted_positive_rate=.05)
+    choices["pretraining"]["sample_size"] = 40
+    choices["comparisons"]["shifts"] = {"readmission": [.05]}
     choices["repeats"] = 2
     return resolve_config(choices)
 
@@ -101,7 +136,7 @@ def test_exact_allocations_are_disjoint_reproducible_and_seeded(choices):
     config, patients = small_config(choices), cohort(400)
     frames = create_split_manifests(patients, config)
     for name in PARTITIONS:
-        assert len(frames[name]) == config["data"][f"{name}_size"]
+        assert len(frames[name]) == getattr(config.requested.data, f"{name}_size")
     assert len(frames["unused"]) == 72
     ids = [set(frames[name].patient_nbr) for name in (*PARTITIONS, "unused")]
     assert sum(map(len, ids)) == len(set.union(*ids)) == len(patients)
@@ -123,9 +158,13 @@ def test_partition_capacity_and_single_class_fail_early(choices):
         create_split_manifests(patients, config)
 
 
-def test_source_shift_rejects_insufficient_replacement_patients(choices):
+@pytest.mark.parametrize("rate,label", [(.05, "negative"), (.95, "positive")])
+def test_source_shift_rejects_insufficient_replacement_patients(choices, rate, label):
     config = small_config(choices)
+    choices["comparisons"]["shifts"]["readmission"] = [rate]
+    config = resolve_config(choices)
     patients = cohort(41)
-    # Any 40-patient S0 has about 20 positives to replace, but at most one spare negative.
-    with pytest.raises(ValueError, match="Not enough unused negative patients"):
+    # A 40-patient sample needs 38 of one class, but the pool has only 20/21.
+    with pytest.raises(ValueError, match=f"S1 requires 38 {label} patients; source pool has") as error:
         create_source_pair(patients, 0, config)
+    assert "feasible fraction" in str(error.value)

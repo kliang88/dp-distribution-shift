@@ -1,17 +1,20 @@
 """Exact-size, patient-disjoint random partitions and ordered manifests."""
 
+from dataclasses import asdict
+
 import numpy as np
 import pandas as pd
-from dp_shift.config import PARTITIONS
+
+from dp_shift.config import PARTITIONS, ResolvedConfig
 
 from .utils import require
 
 
-def create_split_manifests(cohort, config):
-    sizes = config["data"]
+def create_split_manifests(cohort, config: ResolvedConfig):
+    sizes = asdict(config.requested.data)
     require(sum(sizes.values()) <= len(cohort),
             f"Requested partitions need {sum(sizes.values())} patients; cohort has {len(cohort)}")
-    shuffled = cohort.sample(frac=1, random_state=config["seeds"]["partition"])
+    shuffled = cohort.sample(frac=1, random_state=config.seeds.partition)
     frames, start = {"cohort": cohort}, 0
     for name in PARTITIONS:
         end = start + sizes[f"{name}_size"]
@@ -22,12 +25,12 @@ def create_split_manifests(cohort, config):
     return frames
 
 
-def validate_splits(frames, config):
+def validate_splits(frames, config: ResolvedConfig):
     require(set(frames) == {"cohort", *PARTITIONS, "unused"}, "Unexpected partition names")
     for name, frame in frames.items():
         require(frame.patient_nbr.is_unique, f"Duplicate patients in {name}")
         if name in PARTITIONS:
-            require(len(frame) == config["data"][f"{name}_size"], f"Incorrect patient count: {name}")
+            require(len(frame) == getattr(config.requested.data, f"{name}_size"), f"Incorrect patient count: {name}")
             require(set(frame.y) == {0, 1}, f"Partition {name} must contain both classes")
     seen = set()
     for name in (*PARTITIONS, "unused"):

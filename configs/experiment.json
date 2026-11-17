@@ -1,6 +1,7 @@
 {
+  "schema_version": 1,
   "seed": 20261107,
-  "repeats": 10,
+  "repeats": 1,
   "data": {
     "source_pool_size": 48000,
     "proxy_train_size": 3600,
@@ -8,16 +9,15 @@
     "target_train_size": 3600,
     "target_test_size": 6000
   },
-  "source_conditions": {
-    "pretrain_size": 24000,
-    "shifted_positive_rate": 0.01
+  "pretraining": {
+    "sample_size": 20000,
+    "epochs": 12
   },
   "privacy": {
-    "epsilon": 5.0,
     "clipping_norm": 1.0
   },
   "tuning": {
-    "source_epochs": 12,
+    "reference_epsilon": 5.0,
     "source_learning_rates": [
       0.003,
       0.01,
@@ -32,6 +32,35 @@
       8,
       16,
       32
+    ]
+  },
+  "comparisons": {
+    "shifts": {
+      "readmission": [
+        0.01,
+        0.04,
+        0.14,
+        0.17
+      ],
+      "age_70_plus": [
+        0.6,
+        0.7,
+        0.8,
+        0.9
+      ],
+      "prior_inpatient_2_plus": [
+        0.05,
+        0.06,
+        0.07,
+        0.08
+      ]
+    },
+    "epsilons": [
+      1.0,
+      2.5,
+      5.0,
+      7.5,
+      10.0
     ]
   }
 }

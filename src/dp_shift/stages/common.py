@@ -11,7 +11,7 @@ import tempfile
 from dp_shift.data.utils import file_hash, read_json, require, write_json
 
 
-FORMAT = "dp-shift-minimal-v3"
+FORMAT = "dp-shift-csv-v1"
 STAGES = ("prepare", "train", "evaluate")
 
 
@@ -59,8 +59,14 @@ def workspace(output):
         require(not output.exists() or not any(output.iterdir()),
                 "Output is nonempty and has no minimal protocol; choose a new --output directory")
         atomic_json(output / "protocol.json", {"format": FORMAT, "stages": {}})
+    return owned_workspace(output, FORMAT)
+
+
+def owned_workspace(output, format):
+    """Create or reopen temporary files belonging to a known output format."""
+    output = Path(output).resolve()
     work = output / ".work"
-    owner = {"format": FORMAT, "output": str(output)}
+    owner = {"format": format, "output": str(output)}
     require(not work.is_symlink(), "Refusing a symlinked .work directory")
     if work.exists():
         require(read_json(work / "owner.json") == owner, "Unrecognized .work directory")
@@ -88,7 +94,7 @@ def verify(output, stage):
     """Verify published artifacts without checkpoints, raw inputs, or inference."""
     output = Path(output)
     saved = protocol(output)
-    require(stage in saved["stages"], f"{stage} is incomplete; run dp-shift {stage}")
+    require(stage in saved["stages"], f"{stage} is incomplete; rerun dp-shift experiment")
     for name in STAGES[:STAGES.index(stage) + 1]:
         record = saved["stages"][name]
         expected = {prior: digest(saved["stages"][prior]) for prior in STAGES[:STAGES.index(name)]}
@@ -117,6 +123,11 @@ def completed(output, stage, config):
 def cleanup(output):
     """Discard owned temporary models/caches only after published results verify."""
     verify(output, "evaluate")
+    remove_workspace(output, FORMAT)
+
+
+def remove_workspace(output, format):
+    """Remove owned work files; callers must verify published results first."""
     work = Path(output).resolve() / ".work"
     if work.exists():
         require(not work.is_symlink(), "Refusing to remove a symlinked .work directory")
@@ -125,7 +136,7 @@ def cleanup(output):
         if not owner.exists() and not any(work.iterdir()):
             work.rmdir()
             return
-        require(read_json(owner) == {"format": FORMAT, "output": str(Path(output).resolve())},
+        require(read_json(owner) == {"format": format, "output": str(Path(output).resolve())},
                 "Refusing to remove an unrecognized .work directory")
         # Keep ownership evidence until the end so interrupted deletion can resume.
         for child in work.iterdir():

@@ -13,6 +13,7 @@ from opacus.accountants import PRVAccountant
 from opacus.accountants.utils import get_noise_multiplier
 from opacus.validators import ModuleValidator
 
+from dp_shift.config import PROTOCOL, TrainingSettings
 from dp_shift.data.utils import require
 from .loaders import generator
 
@@ -61,11 +62,11 @@ def wrap_private(model, optimizer, loader, noise_multiplier, clipping_norm, nois
 def privacy_summary(engine, settings, steps):
     actual_steps = accounted_steps(engine.accountant)
     require(actual_steps == steps, "Accountant and optimizer step counts disagree")
-    epsilon = float(engine.get_epsilon(delta=settings["delta"]))
-    require(math.isfinite(epsilon) and epsilon <= settings["epsilon_cap"], "Achieved epsilon exceeds the budget")
-    return {"accountant": "prv", "epsilon_achieved": epsilon, "delta": settings["delta"],
-            "noise_multiplier": settings["noise_multiplier"], "clipping_norm": settings["clipping_norm"],
-            "sampling_rate": 1 / settings["steps_per_epoch"], "steps": actual_steps,
+    epsilon = float(engine.get_epsilon(delta=PROTOCOL.delta))
+    require(math.isfinite(epsilon) and epsilon <= settings.config.requested.privacy.epsilon, "Achieved epsilon exceeds the budget")
+    return {"accountant": "prv", "epsilon_achieved": epsilon, "delta": PROTOCOL.delta,
+            "noise_multiplier": settings.noise_multiplier, "clipping_norm": settings.config.requested.privacy.clipping_norm,
+            "sampling_rate": 1 / PROTOCOL.steps_per_epoch, "steps": actual_steps,
             "accountant_history": [list(entry) for entry in engine.accountant.history]}
 
 

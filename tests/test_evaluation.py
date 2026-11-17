@@ -7,7 +7,7 @@ import pytest
 from dp_shift.data.utils import file_hash, write_json
 from dp_shift.evaluation.metrics import CONDITIONS, curve_key, curve_values, metric_values, validate_curves
 from dp_shift.evaluation.score import read_prediction_cache
-from dp_shift.evaluation.summarize import classify_interaction, interval, paired_effects, summary_tables
+from dp_shift.evaluation.summarize import classify_amplification, interval, paired_effects, summary_tables
 
 
 def test_metrics_match_hand_calculations_and_constant_reference():
@@ -63,16 +63,16 @@ def fake_runs():
                           "initialization": CONDITIONS[path][1]} for repeat in range(2) for path, value in ap.items()])
 
 
-def test_paired_effects_cancel_scratch_and_preserve_ap_signs():
+def test_paired_effects_cancel_scratch_and_use_positive_dp_amplification():
     runs = fake_runs()
     effects = paired_effects(runs, 2)
-    assert effects.ap_gain_sgd_s0.iloc[0] == pytest.approx(.03)
-    assert effects.ap_shift_sgd.iloc[0] == pytest.approx(-.01)
-    assert effects.ap_shift_dp.iloc[0] == pytest.approx(-.03)
-    assert effects.ap_dp_interaction.iloc[0] == pytest.approx(-.02)
+    assert effects.gain_sgd_baseline.iloc[0] == pytest.approx(.03)
+    assert effects.shift_penalty_sgd.iloc[0] == pytest.approx(.01)
+    assert effects.shift_penalty_dp.iloc[0] == pytest.approx(.03)
+    assert effects.dp_amplification.iloc[0] == pytest.approx(.02)
     runs.loc[runs.path_id.isin(["A", "C"]), "average_precision"] += .5
     other = paired_effects(runs, 2)
-    np.testing.assert_allclose(effects.ap_dp_interaction, other.ap_dp_interaction)
+    np.testing.assert_allclose(effects.dp_amplification, other.dp_amplification)
     with pytest.raises(ValueError, match="Missing or duplicate"):
         paired_effects(runs.iloc[:-1], 2)
 
@@ -82,7 +82,7 @@ def test_paired_effects_cancel_scratch_and_preserve_ap_signs():
     (-.006, .004, "inconclusive"), (-.007, -.005, "inconclusive"), (.005, .007, "inconclusive"),
 ])
 def test_interval_decision_boundaries(lower, upper, expected):
-    assert classify_interaction(lower, upper) == expected
+    assert classify_amplification(lower, upper) == expected
 
 
 def test_t_interval_and_zero_variance():
@@ -92,7 +92,7 @@ def test_t_interval_and_zero_variance():
     assert result["ci_upper"] == pytest.approx(2 + 12.706204736432095)
     result = interval([.002] * 10)
     assert result["ci_lower"] == pytest.approx(.002) and result["ci_upper"] == pytest.approx(.002)
-    assert classify_interaction(result["ci_lower"], result["ci_upper"]) == "small"
+    assert classify_amplification(result["ci_lower"], result["ci_upper"]) == "small"
 
 
 def test_cache_alignment_is_checked_independently_of_file_hash(tmp_path):
@@ -106,19 +106,19 @@ def test_cache_alignment_is_checked_independently_of_file_hash(tmp_path):
 
 def test_paper_tables_are_six_models_and_seven_paired_ap_effects():
     runs = fake_runs()
-    tables = summary_tables(runs, {"repeats": 2, "confidence_level": .95, "practical_ap_threshold": .005})
+    tables = summary_tables(runs, 2)
     assert set(tables) == {"metrics.csv", "effects.csv"}
     metrics, effects = tables["metrics.csv"], tables["effects.csv"]
     assert len(metrics) == 6 and len(effects) == 7
     assert metrics.n.eq(2).all() and metrics.average_precision_sd.eq(0).all()
     np.testing.assert_allclose(metrics.average_precision_mean, [.1, .13, .12, .08, .12, .09])
-    interaction = effects.loc[effects.effect.eq("ap_dp_interaction")].iloc[0]
-    assert interaction["mean"] == pytest.approx(-.02)
-    assert interaction.ci_lower == pytest.approx(-.02)
-    assert interaction.interpretation == "negative"
+    interaction = effects.loc[effects.effect.eq("dp_amplification")].iloc[0]
+    assert interaction["mean"] == pytest.approx(.02)
+    assert interaction.ci_lower == pytest.approx(.02)
+    assert interaction.interpretation == "positive"
     # Pairing removes the shared repeat offset; unpaired error propagation would not.
     runs.loc[runs.repeat_id.eq(1), "average_precision"] += .2
-    tables = summary_tables(runs, {"repeats": 2, "confidence_level": .95, "practical_ap_threshold": .005})
+    tables = summary_tables(runs, 2)
     assert tables["metrics.csv"].average_precision_sd.gt(.1).all()
     np.testing.assert_allclose(tables["effects.csv"].sd, 0, atol=1e-15)
 
@@ -140,3 +140,13 @@ def test_retained_curve_validation_detects_inconsistent_aggregate_data():
     arrays[key][0] += 1
     with pytest.raises(ValueError, match="Invalid calibration positive counts"):
         validate_curves(arrays, runs, reference)
+
+
+def test_single_repeat_keeps_scores_without_uncertainty_or_conclusions():
+    runs = fake_runs().loc[lambda frame: frame.repeat_id.eq(0)]
+    tables = summary_tables(runs, 1)
+    effects = tables['effects.csv']
+    assert effects['mean'].notna().all()
+    assert effects[['sd', 'ci_lower', 'ci_upper', 'interpretation']].isna().all().all()
+    assert effects.loc[effects.effect.eq('dp_amplification'), 'mean'].iloc[0] == pytest.approx(.02)
+    assert tables['metrics.csv'].filter(like='_sd').isna().all().all()

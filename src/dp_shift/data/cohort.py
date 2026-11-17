@@ -1,6 +1,7 @@
 """One index encounter per patient, selected before eligibility exclusions."""
 
 from .utils import require
+from dp_shift.config import PROTOCOL
 
 
 def describe(frame):
@@ -8,9 +9,9 @@ def describe(frame):
             "positive_rate": float(frame.y.mean()) if len(frame) else 0.0}
 
 
-def build_cohort(raw, config, descriptions=None):
+def build_cohort(raw, descriptions=None):
     index = raw.sort_values("encounter_id").drop_duplicates("patient_nbr")
-    excluded_codes = {str(code) for code in config["excluded_discharges"]}
+    excluded_codes = {str(code) for code in PROTOCOL.excluded_discharges}
     excluded = index.discharge_disposition_id.isin(excluded_codes)
     exclusions = index.loc[excluded, ["patient_nbr", "encounter_id", "discharge_disposition_id"]].copy()
     exclusions["reason"] = "death_or_hospice_index_encounter"

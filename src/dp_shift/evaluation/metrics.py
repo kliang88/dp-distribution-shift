@@ -17,13 +17,6 @@ CURVE_FIELDS = ("precision", "recall", "calibration_n", "calibration_positive_n"
                 "histogram_edges", "histogram_n")
 
 
-def model_label(path):
-    method, initialization = CONDITIONS[path]
-    label = {"scratch": "No pretraining", "s0": "Baseline-source pretraining",
-             "s1": "Shifted-source pretraining"}[initialization]
-    return f"{'SGD' if method == 'sgd' else 'DP-SGD'} · {label}"
-
-
 def validate_probabilities(y, probability):
     y, probability = np.asarray(y), np.asarray(probability)
     require(y.ndim == probability.ndim == 1 and y.shape == probability.shape and len(y) > 0,
@@ -89,7 +82,7 @@ def validate_curves(curves, runs, reference):
         require(recall[0] == 1 and recall[-1] == 0 and precision[-1] == 1,
                 "Invalid PR curve endpoints")
         require(np.isclose(-np.sum(np.diff(recall) * precision[:-1]), row.average_precision),
-                "PR curve and AP disagree")
+                "PR curve and AUPRC disagree")
         n, positive_n = data["calibration_n"], data["calibration_positive_n"]
         predicted, observed = data["calibration_mean_prediction"], data["calibration_observed_rate"]
         require(n.ndim == 1 and 0 < len(n) <= 10 and n.dtype.kind in "iu"
