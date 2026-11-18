@@ -10,9 +10,9 @@ from .summarize import paired_effects
 
 OVERALL_FRACTIONS = {
     "readmission": .01,
-    "age_70_plus": .80,
-    "primary_diagnosis_circulatory": .05,
-    "clinical_complexity_2plus": .05,
+    "age_70_plus": .90,
+    "primary_diagnosis_circulatory": .20,
+    "clinical_complexity_2plus": .20,
 }
 
 
