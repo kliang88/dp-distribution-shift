@@ -193,7 +193,7 @@ def verify_training(data_root, output):
 def finalize(data_root, output):
     summary = verify_training(data_root, output)
     frozen = load_frozen(data_root, output)
-    analysis = Path(__file__).resolve().parents[1] / "evaluation/run.py"
+    analysis = Path(__file__).resolve().parents[1] / "evaluation/score.py"
     require(analysis.is_file(), "Frozen evaluation code is missing")
     ready = {key: frozen["data"][key] for key in ["config_sha256", "artifact_manifest_sha256"]}
     ready["analysis"] = {"path": str(analysis), "sha256": file_hash(analysis)}

@@ -12,7 +12,7 @@ from dp_shift.config import resolve_config
 from dp_shift.data.sampling import create_source_pair
 from dp_shift.data.shifts import SHIFTS, Shift, members
 from dp_shift.data.utils import file_hash, read_json, write_json
-from dp_shift.sweep import load_plan, normalize_plan, preflight
+from dp_shift.sweep import load_plan, preflight
 
 
 BASE = Path(__file__).resolve().parents[1] / "configs/experiment.json"
@@ -78,15 +78,12 @@ def test_one_sampler_preserves_labels_pairing_nesting_and_noop(kind, mild, sever
         assert pair["removed"].empty and pair["added"].empty
 
 
-def test_legacy_configs_and_sweeps_normalize_without_mutation(tmp_path):
+def test_legacy_scalar_config_normalizes_without_mutation():
     old = load_plan(BASE)["base"]
     old["source_conditions"] = dict(pretrain_size=20000, shifted_positive_rate=.01)
     original = deepcopy(old)
     assert resolve_config(old).requested.to_dict()["source_conditions"] == dict(pretrain_size=20000, shift_type="readmission", shift_fraction=.01)
     assert old == original
-    saved = {"base": old, "sweep": dict(base_config="no-longer-present.json", shifted_positive_rates=[.01, .04],
-                                         epsilons=[1, 5], reference_epsilon=5)}
-    assert normalize_plan(saved)["sweep"]["shifts"] == {"readmission": [.01, .04]}
 
 
 def test_enrichment_must_preserve_both_readmission_outcomes():
@@ -157,16 +154,17 @@ def test_mixed_sweep_preserves_controls_and_creates_five_faceted_figures(experim
     assert len({tuple(sorted({key: value for key, value in cell["source_hashes"].items() if key.endswith("_s0")}.items()))
                 for cell in saved["cells"]}) == 1
     assert len({tuple(sorted(cell["selected"].items())) for cell in saved["cells"]}) == 1
-    data = tables.read(output)
-    assert set(data["runs"].shift_type) == set(SHIFTS)
-    assert len(list(tables.cells(data))) == 3
+    runs = tables.read(output / tables.RUNS_FILE)
+    assert set(runs.shift_type) == set(SHIFTS)
+    assert len(tables.cells(runs)) == 3
     assert not (output / ".work").exists()
-    for _, cell in tables.cells(data):
-        shifted = cell["runs"].loc[cell["runs"].pretraining.eq("shifted")]
+    for _, cell in tables.cells(runs):
+        shifted = cell.loc[cell.pretraining.eq("shifted")]
         np.testing.assert_allclose(shifted.source_fraction, shifted.shift_fraction)
-    age = data["runs"].loc[data["runs"].shift_type.eq("age_70_plus") & data["runs"].pretraining.eq("shifted")]
-    assert not np.allclose(age.source_fraction, age.source_prevalence)
-    hashes = {name: file_hash(output / name) for name in tables.FILES}
+    age = runs.loc[runs.shift_type.eq("age_70_plus")]
+    assert age.test_fraction.eq(saved["cells"][1]["test_characteristics"]["age_70_plus"]["fraction"]).all()
+    assert not np.isclose(age.test_fraction.iloc[0], saved["cells"][1]["test_reference"]["test_prevalence"])
+    csv_hash = file_hash(output / tables.RUNS_FILE)
     captured = {}
     original_save = plots.save
 
@@ -181,5 +179,5 @@ def test_mixed_sweep_preserves_controls_and_creates_five_faceted_figures(experim
     assert set(captured.values()) == {3}
     main(["plot", "--input", str(output), "--output", str(output / "age_plots"), "--shift", "age_70_plus", "--fraction", ".7"])
     assert len(list((output / "age_plots").glob("*.png"))) == 5
-    assert hashes == {name: file_hash(output / name) for name in tables.FILES}
+    assert csv_hash == file_hash(output / tables.RUNS_FILE)
     assert verify(output)["evaluated_models"] == 36

@@ -36,9 +36,7 @@ class Protocol:
     primary_metric: str = "average_precision"
     prediction_batch_size: int = 1024
     confidence_level: float = 0.95
-    practical_ap_threshold: float = 0.005
-    calibration_bins: int = 10
-    evaluation_version: str = "evaluation_v3"
+    evaluation_version: str = "evaluation_v4"
 
 
 PROTOCOL = Protocol()
@@ -60,8 +58,6 @@ FIXED_PROTOCOL = {
     "tuning_selection": "proxy-validation AUPRC; target mean across SGD/DP x scratch/pretrained",
     "tuning_ties": "AUPRC within 1e-6, then Brier, epochs, learning rate",
     "intervals": "Student t across repeats, paired for effects, conditional on fixed test set",
-    "calibration_binning": "10 quantile bins per model/repeat; tied predictions stay together",
-    "pr_summary": "mean step precision at a common recall grid; AUPRC uses exact per-run points",
     "fixed_partitions_across_repeats": True, "cpu_threads": 1,
     "source_replacements": "bidirectional; fixed per-repeat permutation prefixes within each direction; no swaps at equal prevalence",
     "deterministic_algorithms": True,

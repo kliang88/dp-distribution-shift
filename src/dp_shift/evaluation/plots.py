@@ -106,7 +106,7 @@ def dp_amplification(effects, output, budgets, colors, baselines, note=CI_NOTE):
         for budget in budgets:
             data = effects.loc[effects.shift_type.eq(kind) & effects.comparison_epsilon.eq(budget)]
             points = [(fraction, group.dp_amplification) for fraction, group in data.groupby("shift_fraction")]
-            points.append((baseline, np.zeros(data.repeat_id.nunique())))
+            points.append((baseline, np.zeros(data.repeat.nunique())))
             line(axis, points, f"ε={budget:g}", colors[budget], scale=100)
             axis.plot(baseline, 0, "s", color=colors[budget], markersize=6)
         axis.axhline(0, color="#555555", linestyle="--", linewidth=1)

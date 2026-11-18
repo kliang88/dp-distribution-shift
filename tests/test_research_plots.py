@@ -4,39 +4,33 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from dp_shift.evaluation.metrics import CONDITIONS
+from dp_shift.evaluation.tables import CONDITIONS
 from dp_shift.evaluation.summarize import paired_effects
 
 
 def test_five_figures_use_paired_repeats_and_positive_amplification(monkeypatch, tmp_path):
     from dp_shift.evaluation import plots
 
-    raw, contrasts = [], []
+    raw = []
     for prevalence in (.01, .2):
         for epsilon in (1., 5.):
             scores = {"A": .1, "B-S0": .13, "B-S1": .12 if prevalence == .01 else .11,
                       "C": .08, "D-S0": .12 if epsilon == 1 else .15,
                       "D-S1": (.09 if prevalence == .01 else .07) if epsilon == 1 else (.12 if prevalence == .01 else .11)}
-            internal = []
             for repeat in range(3):
                 for path, (method, initialization) in CONDITIONS.items():
                     # Shared repeat offsets change model CIs but cancel in paired contrasts.
                     value = scores[path] + repeat * .01
-                    source = {"scratch": np.nan, "s0": .09, "s1": prevalence}[initialization]
-                    raw.append(dict(repeat=repeat, method=method, pretraining={"scratch": "none", "s0": "baseline", "s1": "shifted"}[initialization],
+                    source = {"none": np.nan, "baseline": .09, "shifted": prevalence}[initialization]
+                    raw.append(dict(repeat=repeat, method=method, pretraining=initialization,
                                     shift_type="readmission", shift_fraction=prevalence, comparison_epsilon=epsilon, auprc=value,
-                                    source_fraction=source, source_prevalence=source, source_size=20000 if initialization != "scratch" else np.nan,
-                                    test_fraction=.1, test_prevalence=.1))
-                    internal.append(dict(repeat_id=repeat, path_id=path, status="complete", method=method,
-                                         initialization=initialization, average_precision=value, auroc=.6, brier=.1,
-                                         test_prevalence=.1, mean_prediction=.2, calibration_bias=.1))
-            effects = paired_effects(pd.DataFrame(internal), 3)
-            effects["shift_type"], effects["shift_fraction"], effects["comparison_epsilon"] = "readmission", prevalence, epsilon
-            contrasts.append(effects)
+                                    source_fraction=source, source_size=20000 if initialization != "none" else np.nan,
+                                    test_fraction=.1, test_size=100))
+    runs = pd.DataFrame(raw)
     captured = {}
     monkeypatch.setattr(plots, "save", lambda figure, output, name, caption: captured.update({name: figure}))
     try:
-        count = plots.plot(pd.DataFrame(raw), pd.concat(contrasts), 100, tmp_path, epsilon=5., fractions={"readmission": .2})
+        count = plots.plot(runs, paired_effects(runs), 100, tmp_path, epsilon=5., fractions={"readmission": .2})
         assert count == 5 and set(captured) == set(plots.FIGURES)
         overall = captured["overall_performance"].axes[0]
         bars = [container for container in overall.containers if hasattr(container, "patches")]
@@ -81,7 +75,7 @@ def test_amplification_compares_budgets_with_separate_characteristic_axes(monkey
             for budget in budgets:
                 for repeat in range(3):
                     rows.append(dict(shift_type=kind, shift_fraction=fraction, comparison_epsilon=budget,
-                                     repeat_id=repeat,
+                                     repeat=repeat,
                                      dp_amplification=(index + 1) * (level + 1) * .01 + budget * .001 + (repeat - 1) * .001))
     captured = []
     monkeypatch.setattr(plots, "save", lambda figure, *args: captured.append(figure))

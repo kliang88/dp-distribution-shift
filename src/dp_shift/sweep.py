@@ -1,42 +1,24 @@
 """Run scalar experiments over a grid, then retain only combined research outputs."""
 
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
-from copy import deepcopy
 from multiprocessing import get_context
 import os
 from pathlib import Path
 import signal
 
-from .config import (SelectedHyperparameters, comparison_config, exact_keys,
-                     resolve_config, study_plan, validate_comparisons)
+from .config import (SelectedHyperparameters, comparison_config, resolve_config, study_plan)
 from .data.shifts import SHIFTS, members
 from .data.utils import file_hash, read_json, require
 from .stages.common import atomic_json, owned_workspace, remove_workspace
 
 
-FORMAT = "dp-shift-sweep-csv-v1"
+FORMAT = "dp-shift-experiment-runs-v2"
 
 
 def experiment(base, fraction, epsilon, *, shift_type=None):
     """Expand a grid cell into the existing single-experiment schema."""
     kind = base["source_conditions"]["shift_type"] if shift_type is None else shift_type
     return comparison_config(base, kind, fraction, epsilon)
-
-
-def normalize_plan(plan):
-    """Normalize legacy prevalence-only choices once at the input boundary."""
-    choices = deepcopy(plan["sweep"])
-    if "shifted_positive_rates" in choices and "shifts" not in choices:
-        choices["shifts"] = {"readmission": choices.pop("shifted_positive_rates")}
-    # Older retained protocols name their former base file; no file is read here.
-    choices.pop("base_config", None)
-    exact_keys(choices, {"shifts", "epsilons", "reference_epsilon"}, "comparisons")
-    validate_comparisons(choices["shifts"], choices["epsilons"], choices["reference_epsilon"])
-    base = resolve_config(plan["base"]).requested.to_dict()
-    for kind, fractions in choices["shifts"].items():
-        for fraction in fractions:
-            experiment(base, fraction, choices["reference_epsilon"], shift_type=kind)
-    return {"sweep": choices, "base": base}
 
 
 def load_plan(path):
@@ -175,7 +157,7 @@ def run(output, config, progress=print, *, workers=1):
     if manifest.exists():
         saved = read_json(manifest)
         require(saved.get("format") == FORMAT, "Output uses another format; choose a new --output directory")
-        require(normalize_plan(saved["plan"]) == plan, "Sweep settings changed; choose a new --output directory")
+        require(saved["plan"] == plan, "Sweep settings changed; choose a new --output directory")
         if saved["status"] == "complete":
             result = verify(output)
             remove_workspace(output, FORMAT)
@@ -211,12 +193,11 @@ def run(output, config, progress=print, *, workers=1):
         run_parallel(cells, plan["base"], selected, inputs, workers, progress)
 
     runs, records = [], []
-    for (kind, fraction, epsilon), directory in cells.items():
-        scores, record = collect(directory / "result", kind, fraction, epsilon,
-                                 prefix=f"{kind}_{fraction:g}_e{epsilon:g}_")
+    for comparison, directory in cells.items():
+        scores, record = collect(directory / "result", comparison)
         runs.append(scores)
         records.append(record)
-    progress("Publishing combined scores and curve data as four CSV tables…")
+    progress("Publishing combined model scores to runs.csv…")
     publish(output, saved, reference, runs, records)
     result = verify(output)
     remove_workspace(output, FORMAT)
@@ -225,15 +206,14 @@ def run(output, config, progress=print, *, workers=1):
 
 def verify(output):
     """Verify retained CSV data without inputs, temporary data, or inference."""
-    from .evaluation.sweep import verify_tables
-    from .evaluation.tables import FILES
+    from .evaluation.sweep import validate
+    from .evaluation.tables import RUNS_FILE, read
 
     output = Path(output)
     saved = read_json(output / "protocol.json")
     require(saved.get("format") == FORMAT and saved.get("status") == "complete", "Sweep is incomplete")
-    require(set(saved["files"]) == set(FILES), "Sweep output manifest is incomplete")
-    for name in FILES:
-        require(file_hash(output / name) == saved["files"][name], f"Published sweep artifact changed: {name}")
-    verify_tables(output, saved)
+    require(set(saved["files"]) == {RUNS_FILE}, "Experiment output manifest is incomplete")
+    require(file_hash(output / RUNS_FILE) == saved["files"][RUNS_FILE], "Published sweep artifact changed: runs.csv")
+    validate(read(output / RUNS_FILE), saved)
     return {"combinations": len(saved["cells"]), "evaluated_models": saved["evaluated_models"],
             "repeats": saved["plan"]["base"]["repeats"], "output": str(output)}

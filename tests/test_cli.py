@@ -91,7 +91,7 @@ def test_full_cli_reuses_training_resumes_evaluation_and_rejects_corruption(expe
             for key in expected.files:
                 np.testing.assert_array_equal(actual[key], expected[key])
     assert not (output / "data/target_test.npz").exists()
-    first_cache = cell / ".work/evaluation_v3/predictions/repeat_00/A.npz"
+    first_cache = cell / ".work/evaluation_v4/predictions/repeat_00/A.npz"
     first_mtime = first_cache.stat().st_mtime_ns
     checkpoint = cell / ".work/training/repeat_00/A.pt"
     checkpoint_mtime = checkpoint.stat().st_mtime_ns
@@ -113,14 +113,19 @@ def test_full_cli_reuses_training_resumes_evaluation_and_rejects_corruption(expe
         assert first_cache.stat().st_mtime_ns == first_mtime
         assert checkpoint.stat().st_mtime_ns == checkpoint_mtime
         assert file_hash(root / ".work/evaluation_ready.json") == readiness_hash
-        original = pd.read_csv(root / ".work/evaluation_v3/runs.csv")
-        exported = tables.read(root)
-        retained, curves, reference = tables.internal(exported)
-        for metric in ("average_precision", "auroc", "brier", "calibration_bias"):
-            np.testing.assert_allclose(retained[metric], original[metric], rtol=1e-12)
-        assert len(exported["runs"]) == 12
-        assert reference["n"] == 80
-        assert len(curves) == 12 * 8
+        from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
+
+        exported = tables.read(root / tables.RUNS_FILE)
+        assert len(exported) == 12 and exported.test_size.eq(80).all()
+        with np.load(root / ".work/data/evaluation/target_test.npz") as test:
+            for row in exported.itertuples():
+                path_id = tables.PATHS[row.method, row.pretraining]
+                cache = root / f".work/evaluation_v4/predictions/repeat_{row.repeat:02d}/{path_id}.npz"
+                with np.load(cache) as predictions:
+                    labels, probability = test["y"], predictions["probability"]
+                    assert row.auprc == average_precision_score(labels, probability)
+                    assert row.auroc == roc_auc_score(labels, probability)
+                    assert row.brier == brier_score_loss(labels, probability)
         ledger = read_json(root / "protocol.json")["stages"]["evaluate"]["privacy"]
         assert len(ledger) == 6
         assert all(row["epsilon_achieved"] <= 4 and row["clipping_norm"] == .7 for row in ledger.values())
@@ -144,9 +149,9 @@ def test_full_cli_reuses_training_resumes_evaluation_and_rejects_corruption(expe
     assert "EXPERIMENT COMPLETE" in capsys.readouterr().out
     assert not (output / ".work").exists()
     assert read_json(output / "protocol.json")["configuration"] == read_json(config_path)
-    expected_files = {"protocol.json", *tables.FILES}
+    expected_files = {"protocol.json", tables.RUNS_FILE}
     assert {p.relative_to(output).as_posix() for p in output.rglob("*") if p.is_file()} == expected_files
-    hashes = {name: file_hash(output / name) for name in tables.FILES}
+    csv_hash = file_hash(output / tables.RUNS_FILE)
     with monkeypatch.context() as patch:
         patch.setattr(scoring, "predict", lambda *a: pytest.fail("Plotting must not run inference"))
         patch.setattr(training, "step_batch", fail_training)
@@ -154,7 +159,7 @@ def test_full_cli_reuses_training_resumes_evaluation_and_rejects_corruption(expe
     assert {p.name for p in (output / "plots").iterdir()} == {f"{name}.png" for name in FIGURES}
     for name in FIGURES:
         assert (output / f"plots/{name}.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
-    assert hashes == {name: file_hash(output / name) for name in tables.FILES}
+    assert csv_hash == file_hash(output / tables.RUNS_FILE)
 
     runs_csv = output / "data/runs.csv"
     runs_csv.write_text(runs_csv.read_text() + "corrupted")

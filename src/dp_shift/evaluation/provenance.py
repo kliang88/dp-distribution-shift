@@ -1,11 +1,8 @@
 """Freeze evaluation separately, preserving every original training artifact."""
 
-from contextlib import contextmanager
 from copy import deepcopy
 from importlib.metadata import version
-import os
 from pathlib import Path
-import tempfile
 
 from dp_shift.config import PROTOCOL, load_config
 from dp_shift.data.artifacts import validate_evaluation_manifest, verify_artifacts
@@ -25,29 +22,6 @@ def versions():
             ["matplotlib", "Pillow", "fonttools", "cycler", "kiwisolver", "pyparsing", "contourpy"]}}
 
 
-@contextmanager
-def atomic_path(path):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, name = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=path.suffix, dir=path.parent)
-    os.close(descriptor)
-    temporary = Path(name)
-    try:
-        yield temporary
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def atomic_csv(path, frame):
-    with atomic_path(path) as temporary:
-        frame.to_csv(temporary, index=False, float_format="%.17g")
-
-
-def require_open(output):
-    require(not (Path(output) / "COMPLETE.json").exists(), "Evaluation is complete; use verify instead of overwriting")
-
-
 def freeze(data_root, experiment, output, config_path):
     data_root, experiment, output = (Path(p).resolve() for p in [data_root, experiment, output])
     config = load_config(config_path)
@@ -57,7 +31,6 @@ def freeze(data_root, experiment, output, config_path):
                 and frozen["experiment"] == str(experiment), "Different evaluation configuration or inputs")
         return frozen
     require(not output.exists() or not any(output.iterdir()), "Unfinished evaluation directory; investigate it first")
-    require(not (experiment / "runs.csv").exists(), "Legacy evaluator has already scored the test set")
     require(not (data_root / "evaluation").exists(), "Test inputs already belong to another evaluation version")
     verify_artifacts(data_root)
     verify_training(data_root, experiment)
@@ -68,8 +41,6 @@ def freeze(data_root, experiment, output, config_path):
     original_ready = experiment / "evaluation_ready.json"
     validate_evaluation_manifest(original_ready, data_root)
     ready = deepcopy(read_json(original_ready))
-    ready["analysis"] = {"path": str(Path(__file__).with_name("run.py").resolve()),
-                         "sha256": file_hash(Path(__file__).with_name("run.py"))}
     ready["original_readiness_sha256"] = file_hash(original_ready)
     ready["evaluation_version"] = PROTOCOL.evaluation_version
     output.mkdir(parents=True, exist_ok=True)
@@ -99,24 +70,4 @@ def load_evaluation(output):
             "Evaluation readiness changed")
     load_frozen(frozen["data_root"], frozen["experiment"])
     validate_evaluation_manifest(output / "inputs/evaluation_ready.json", frozen["data_root"])
-    return frozen
-
-
-def verify_scored(output):
-    output = Path(output)
-    frozen = load_evaluation(output)
-    scored = read_json(output / "SCORED.json")
-    require(scored.get("status") == "complete", "Scoring is incomplete")
-    require(scored["freeze_sha256"] == file_hash(output / "frozen_evaluation.json"), "Scoring freeze mismatch")
-    expected = {"runs.csv", "curves.npz", "prediction_index.json", "test_reference.json", "test_rows.csv"}
-    require(set(scored["files"]) == expected, "Incomplete scored artifact list")
-    for name, digest in scored["files"].items():
-        require(file_hash(output / name) == digest, f"Scoring artifact changed: {name}")
-    index = read_json(output / "prediction_index.json")
-    require(len(index) == len(frozen["runs"]), "Missing prediction caches")
-    require(set(index) == {f"repeat_{r['repeat_id']:02d}/{r['path_id']}" for r in frozen["runs"]},
-            "Incorrect prediction-cache paths")
-    for entry in index.values():
-        for name, digest in entry.items():
-            require(file_hash(output / name) == digest, f"Prediction cache changed: {name}")
     return frozen

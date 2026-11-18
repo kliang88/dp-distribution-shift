@@ -11,7 +11,7 @@ import tempfile
 from dp_shift.data.utils import file_hash, read_json, require, write_json
 
 
-FORMAT = "dp-shift-csv-v1"
+FORMAT = "dp-shift-runs-csv-v2"
 STAGES = ("prepare", "train", "evaluate")
 
 

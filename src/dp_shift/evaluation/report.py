@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-import pandas as pd
-
 from dp_shift.data.shifts import SHIFTS
 from dp_shift.data.utils import require
 from . import tables
@@ -21,32 +19,32 @@ def run(input, output=None, progress=print, *, epsilon=None, shift=None, fractio
     from .plots import plot
 
     input = Path(input).resolve()
-    root = input.parent if (input / "runs.csv").is_file() else input
+    if input.is_file():
+        path = input
+    elif (input / "runs.csv").is_file():
+        path = input / "runs.csv"
+    else:
+        path = input / tables.RUNS_FILE
+    data_directory = path.parent
+    root = data_directory.parent if data_directory.name == "data" else data_directory
     output = Path(output).resolve() if output is not None else root / "plots"
-    data_directory = input if (input / "runs.csv").is_file() else input / "data"
-    require(output != root and not output.is_relative_to(data_directory), "Plot output must be separate from the data directory")
-    progress("Reading and validating CSV scores and cohort counts…")
-    data = tables.read(input)
-    runs = data["runs"]
+    require(output != root and (data_directory == root or not output.is_relative_to(data_directory)),
+            "Plot output must be separate from the data directory")
+    progress("Reading and validating model scores and cohort counts…")
+    runs = tables.read(path)
     if shift is not None:
         require(shift in set(runs.shift_type), f"Shift {shift} is absent from the CSV data")
-        ids = set(runs.loc[runs.shift_type.eq(shift), "run_id"])
-        data = {name: table.loc[table.run_id.isin(ids)] for name, table in data.items()}
-        runs = data["runs"]
+        runs = runs.loc[runs.shift_type.eq(shift)]
     kinds = [kind for kind in SHIFTS if kind in set(runs.shift_type)]
     require(fraction is None or len(kinds) == 1, "--fraction requires --shift when plotting multiple shift types")
     epsilon = selected(epsilon, runs.comparison_epsilon.unique(), "epsilon")
     fractions = {kind: selected(fraction, runs.loc[runs.shift_type.eq(kind), "shift_fraction"].unique(), "fraction") for kind in kinds}
     budgets = set(runs.comparison_epsilon)
-    require(all(set(group.comparison_epsilon) == budgets for _, group in runs.groupby("shift_type")),
-            "Shift types must have the same privacy budgets")
-    effects = []
-    for (kind, value, budget), cell in tables.cells(data):
-        scores, _, reference = tables.internal(cell)
-        contrasts = paired_effects(scores, scores.repeat_id.nunique())
-        contrasts["shift_type"], contrasts["shift_fraction"], contrasts["comparison_epsilon"] = kind, value, budget
-        effects.append(contrasts)
+    require(all(set(group.comparison_epsilon) == budgets
+                for _, group in runs.groupby(["shift_type", "shift_fraction"])),
+            "Shift fractions must have the same privacy budgets")
+    effects = paired_effects(runs)
     selection = ", ".join(f"{kind}={value:g}" for kind, value in fractions.items())
     progress(f"Creating five figures; {selection}; epsilon {epsilon:g}…")
-    count = plot(runs, pd.concat(effects, ignore_index=True), reference["n"], output, epsilon, fractions)
+    count = plot(runs, effects, int(runs.test_size.iloc[0]), output, epsilon, fractions)
     return {"figures": count, "epsilon": epsilon, "shifts": selection, "output": str(output)}

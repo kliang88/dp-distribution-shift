@@ -134,7 +134,9 @@ def test_parallel_experiment_matches_serial_sgd_and_reuses_completed_cells(exper
     assert "Running comparisons with 2 CPU workers" in capsys.readouterr().out
     expected = pd.read_csv(serial / "data/runs.csv")
     actual = pd.read_csv(output / "data/runs.csv")
-    assert actual.run_id.tolist() == expected.run_id.tolist()
+    from dp_shift.evaluation.tables import KEY
+
+    pd.testing.assert_frame_equal(actual[KEY], expected[KEY], check_exact=True)
     pd.testing.assert_frame_equal(actual.loc[actual.method.eq("sgd")],
                                   expected.loc[expected.method.eq("sgd")], check_exact=True)
     assert sweep.verify(output)["evaluated_models"] == len(expected)
@@ -152,9 +154,8 @@ def test_parallel_experiment_matches_serial_sgd_and_reuses_completed_cells(exper
 
 def test_grid_recovers_verifies_and_retains_csv_data(experiment, monkeypatch, capsys):
     from dp_shift import sweep
-    from dp_shift.evaluation.sweep import validate, accounted_runs
+    from dp_shift.evaluation.sweep import validate
     from dp_shift.evaluation import tables
-    from dp_shift.evaluation.summarize import summary_tables
     from dp_shift.stages import train
 
     _, output, base = experiment
@@ -194,7 +195,7 @@ def test_grid_recovers_verifies_and_retains_csv_data(experiment, monkeypatch, ca
     with monkeypatch.context() as patch:
         patch.setattr(train, "run", check_reused_cell)
         main(args)
-    assert {p.relative_to(output).as_posix() for p in output.rglob("*") if p.is_file()} == {"protocol.json", *tables.FILES}
+    assert {p.relative_to(output).as_posix() for p in output.rglob("*") if p.is_file()} == {"protocol.json", tables.RUNS_FILE}
     saved = read_json(output / "protocol.json")
     assert saved["reference_tuning"]["selected"] == dict(source_lr=.01, target_lr=.01, target_epochs=1)
     assert len(saved["reference_tuning"]["candidates"]) == 5
@@ -203,50 +204,39 @@ def test_grid_recovers_verifies_and_retains_csv_data(experiment, monkeypatch, ca
         assert cell["selected"]["target_epochs"] == 1
         assert cell["selected"]["source_lr"] == cell["selected"]["target_lr"] == .01
     assert len({tuple(sorted(c["membership_hashes"].items())) for c in saved["cells"]}) == 1
-    data = tables.read(output)
-    runs = data["runs"]
+    runs = tables.read(output / tables.RUNS_FILE)
     for _, group in runs.groupby(["repeat", "comparison_epsilon"]):
-        baseline = group.loc[group.pretraining.eq("baseline"), "source_prevalence"].iloc[0]
+        baseline = group.loc[group.pretraining.eq("baseline"), "source_fraction"].iloc[0]
         shifted = group.loc[group.pretraining.eq("shifted")]
-        assert shifted.loc[shifted.shift_fraction.eq(.1), "source_prevalence"].lt(baseline).all()
-        assert shifted.loc[shifted.shift_fraction.eq(.6), "source_prevalence"].gt(baseline).all()
-    ledger = {key: value for cell in saved["cells"] for key, value in cell["privacy"].items()}
-    internal = accounted_runs(data, ledger)
+        assert shifted.loc[shifted.shift_fraction.eq(.1), "source_fraction"].lt(baseline).all()
+        assert shifted.loc[shifted.shift_fraction.eq(.6), "source_fraction"].gt(baseline).all()
     assert len(runs) == 4 * 6 * 2
-    assert list(runs.columns) == tables.COLUMNS["runs"]
-    private = runs.loc[runs.method.eq("dp_sgd")]
-    assert private.epsilon_achieved.le(private.comparison_epsilon).all()
-    assert len({row["noise_multiplier"] for row in ledger.values()}) == 2
-    assert runs.loc[runs.method.eq("sgd"), "epsilon_achieved"].isna().all()
-    assert runs.run_id.is_unique
+    assert list(runs.columns) == tables.COLUMNS
+    assert runs.test_size.eq(80).all()
+    assert not runs.duplicated(tables.KEY).any()
+    for cell in saved["cells"]:
+        assert len(cell["privacy"]) == 6
+        assert all(row["epsilon_achieved"] <= cell["comparison_epsilon"] for row in cell["privacy"].values())
     assert not (output / "plots").exists()
-    for _, cell in tables.cells(data):
-        scores, curves, reference = tables.internal(cell)
-        assert reference["n"] == 80
-        assert len(curves) == 12 * 8
-        effects = summary_tables(scores, 2)["effects.csv"]
-        ap = scores.pivot(index="repeat_id", columns="path_id", values="average_precision")
-        interaction = (ap["D-S0"] - ap["D-S1"]) - (ap["B-S0"] - ap["B-S1"])
-        assert effects.loc[effects.effect.eq("dp_amplification"), "mean"].iloc[0] == pytest.approx(interaction.mean())
-    hashes = {name: file_hash(output / name) for name in tables.FILES}
+    csv_hash = file_hash(output / tables.RUNS_FILE)
     main(["plot", "--input", str(output / "data")])
     assert len(list((output / "plots").rglob("*.png"))) == 5
     assert (output / "plots/dp_amplification.png").is_file()
-    assert hashes == {name: file_hash(output / name) for name in tables.FILES}
+    assert csv_hash == file_hash(output / tables.RUNS_FILE)
     assert verify(output)["evaluated_models"] == 48
     with monkeypatch.context() as patch:
         patch.setattr(sweep, "reference_tuning", lambda *args: pytest.fail("Completed sweep tuned again"))
         main(args)
 
     # Verification uses retained scores/accounting, even without source files.
-    changed = internal.copy()
-    changed.loc[changed.method.eq("dp_sgd"), "epsilon_achieved"] = 100.
-    with pytest.raises(ValueError, match="privacy settings"):
-        validate(changed, saved)
+    changed = deepcopy(saved)
+    next(iter(changed["cells"][0]["privacy"].values()))["epsilon_achieved"] = 100.
+    with pytest.raises(ValueError, match="Privacy settings"):
+        validate(runs, changed)
     changed_saved = deepcopy(saved)
     changed_saved["cells"][1]["membership_hashes"]["target_train"] = "wrong"
     with pytest.raises(ValueError, match="partitions differ"):
-        validate(internal, changed_saved)
+        validate(runs, changed_saved)
     (output / "data/runs.csv").write_text("corrupted\n")
     with pytest.raises(ValueError, match="artifact changed"):
         verify(output)
