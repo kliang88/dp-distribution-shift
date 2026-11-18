@@ -25,7 +25,7 @@ def selected(value, available, name, *, preferred=None):
 
 
 def run(input, output=None, progress=print, *, epsilon=None, shift=None, fraction=None):
-    from .plots import plot
+    from .plots import FIGURES, plot
 
     input = Path(input).resolve()
     if input.is_file():
@@ -59,7 +59,8 @@ def run(input, output=None, progress=print, *, epsilon=None, shift=None, fractio
     effects = paired_effects(runs)
     selection = ", ".join(f"{kind}={value:g}" for kind, value in fractions.items())
     overall_selection = ", ".join(f"{kind}={value:g}" for kind, value in overall_fractions.items())
-    progress(f"Creating five figures with overall performance at {overall_selection} (ε={epsilon:g})…")
+    progress(f"Creating {len(FIGURES)} figures with overall performance and privacy–utility at {overall_selection}. "
+             f"Overall performance uses ε={epsilon:g}…")
     count = plot(runs, effects, int(runs.test_size.iloc[0]), output, epsilon, fractions,
                  overall_fractions=overall_fractions)
     summary = {"figures": count, "epsilon": epsilon, "shifts": selection, "output": str(output)}

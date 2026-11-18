@@ -82,7 +82,7 @@ main(["plot", "--input", sys.argv[1]])
 '''
     result = subprocess.run([sys.executable, "-c", script, str(path)], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert len(list((tmp_path / "plots").glob("*.png"))) == 5
+    assert len(list((tmp_path / "plots").glob("*.png"))) == 6
     assert {file.name for file in tmp_path.iterdir()} == {"runs.csv", "plots"}
     assert path.read_bytes() == original
 

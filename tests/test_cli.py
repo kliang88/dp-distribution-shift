@@ -307,10 +307,10 @@ def test_single_repeat_experiment_and_plots(experiment, monkeypatch):
     runs = pd.read_csv(output / 'data/runs.csv')
     assert len(runs) == 6 and runs.repeat.nunique() == 1
     original_save = plots.save
-    captions = []
+    captions = {}
 
     def inspect(figure, destination, name, caption, **kwargs):
-        captions.append(caption)
+        captions[name] = caption
         for axis in figure.axes:
             for container in axis.containers:
                 if hasattr(container, 'has_yerr'):
@@ -321,5 +321,7 @@ def test_single_repeat_experiment_and_plots(experiment, monkeypatch):
 
     monkeypatch.setattr(plots, 'save', inspect)
     main(['plot', '--input', str(output)])
-    assert len(captions) == 5
-    assert all('Single repeat; uncertainty not estimated.' in caption for caption in captions)
+    assert set(captions) == set(plots.FIGURES)
+    for name in ('privacy_utility', 'source_target_prevalence', 'source_target_gap'):
+        assert 'Single repeat. Confidence intervals require multiple repeats.' in captions.pop(name)
+    assert all('Single repeat; uncertainty not estimated.' in caption for caption in captions.values())

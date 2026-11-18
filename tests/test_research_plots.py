@@ -10,7 +10,7 @@ from dp_shift.evaluation.tables import CONDITIONS
 from dp_shift.evaluation.summarize import paired_effects
 
 
-def test_five_figures_use_paired_repeats_and_positive_amplification(monkeypatch, tmp_path):
+def test_figures_use_paired_repeats_and_positive_amplification(monkeypatch, tmp_path):
     from dp_shift.evaluation import plots
 
     raw = []
@@ -25,17 +25,23 @@ def test_five_figures_use_paired_repeats_and_positive_amplification(monkeypatch,
                 for path, (method, initialization) in CONDITIONS.items():
                     # Shared repeat offsets change model CIs but cancel in paired contrasts.
                     value = scores[path] + repeat * .01
-                    source = {"none": np.nan, "baseline": .09, "shifted": prevalence}[initialization]
+                    source = {"none": np.nan, "baseline": .08 + repeat * .01, "shifted": prevalence}[initialization]
                     raw.append(dict(repeat=repeat, method=method, pretraining=initialization,
                                     shift_type="readmission", shift_fraction=prevalence, comparison_epsilon=epsilon, auprc=value,
                                     source_fraction=source, source_size=20000 if initialization != "none" else np.nan,
                                     test_fraction=.1, test_size=100))
     runs = pd.DataFrame(raw)
     captured = {}
-    monkeypatch.setattr(plots, "save", lambda figure, output, name, caption, **kwargs: captured.update({name: figure}))
+    captions = {}
+
+    def inspect(figure, output, name, caption, **kwargs):
+        captured[name] = figure
+        captions[name] = caption
+
+    monkeypatch.setattr(plots, "save", inspect)
     try:
         count = plots.plot(runs, paired_effects(runs), 100, tmp_path, epsilon=5., fractions={"readmission": .2})
-        assert count == 5 and set(captured) == set(plots.FIGURES)
+        assert count == 6 and set(captured) == set(plots.FIGURES)
         overall = captured["overall_performance"].axes[0]
         bars = [container for container in overall.containers if hasattr(container, "patches")]
         assert len(bars) == 2
@@ -71,16 +77,33 @@ def test_five_figures_use_paired_repeats_and_positive_amplification(monkeypatch,
         np.testing.assert_allclose(tradeoff.containers[1].lines[0].get_xdata(), [1, 5])
         np.testing.assert_allclose(tradeoff.containers[1].lines[0].get_ydata(), [.13, .16])
         np.testing.assert_allclose(tradeoff.containers[2].lines[0].get_ydata(), [.08, .12])
-        distribution = captured["source_target_prevalence"].axes[0]
-        np.testing.assert_allclose([bar.get_height() for bar in distribution.containers[0]], [.1, .09, .01, .2])
-        assert "n=100" in distribution.get_xticklabels()[0].get_text()
-        assert "n=20,000" in distribution.get_xticklabels()[1].get_text()
+        distribution, gap = (captured[name].axes[0] for name in ("source_target_prevalence", "source_target_gap"))
+        assert [label.get_text() for label in distribution.get_xticklabels()] == ["Unshifted", "1%", "20%"]
+        assert any(text.get_text() == "Target: 10.0%" for text in distribution.texts)
+        assert gap.get_xticklabels()[0].get_text() == "Readmission Prevalence\n1% / 20%"
+        np.testing.assert_allclose(distribution.lines[-1].get_ydata(), [.1, .1])
+        np.testing.assert_allclose(gap.lines[-1].get_ydata(), [0, 0])
+        assert distribution.get_ylim()[0] == 0
+        source_bars = [container for container in distribution.containers if hasattr(container, "patches")]
+        gap_bars = [container for container in gap.containers if hasattr(container, "patches")]
+        for source, difference, expected in zip(source_bars, gap_bars, [[.09], [.01, .2]], strict=True):
+            np.testing.assert_allclose([bar.get_height() for bar in source], expected)
+            np.testing.assert_allclose([bar.get_height() for bar in difference], (np.array(expected) - .1) * 100)
+            assert all(bar.get_y() == 0 for bar in [*source, *difference])
+            assert source.errorbar.has_yerr and difference.errorbar.has_yerr
+            bounds = np.asarray(source.errorbar.lines[2][0].get_segments())[:, :, 1]
+            gap_bounds = np.asarray(difference.errorbar.lines[2][0].get_segments())[:, :, 1]
+            np.testing.assert_allclose(gap_bounds, (bounds - .1) * 100)
+        assert gap_bars[0].errorbar.lines[2][0].get_segments()[0][0, 1] < -1
+        for name in ("source_target_prevalence", "source_target_gap"):
+            assert "Source n=20,000 per cohort. Fixed target test n=100." in captions[name]
+            assert "95% t intervals across 3 repeats" in captions[name]
     finally:
         for figure in captured.values():
             plots.plt.close(figure)
 
 
-def test_overall_performance_uses_planned_levels_and_matched_panel_scores(monkeypatch, tmp_path):
+def test_performance_figures_use_planned_levels_and_matched_panel_scores(monkeypatch, tmp_path):
     from dp_shift.evaluation import plots, report, tables
 
     scenarios = {
@@ -104,18 +127,18 @@ def test_overall_performance_uses_planned_levels_and_matched_panel_scores(monkey
     runs = pd.DataFrame(rows, columns=tables.COLUMNS)
     path = tmp_path / "runs.csv"
     tables.write(path, runs)
-    captured = []
+    captured = {"overall_performance": [], "privacy_utility": []}
 
     def inspect(figure, directory, name, caption, **kwargs):
-        if name == "overall_performance":
-            captured.append((figure, caption))
+        if name in captured:
+            captured[name].append((figure, caption))
         else:
             plots.plt.close(figure)
 
     monkeypatch.setattr(plots, "save", inspect)
     try:
         report.run(path, progress=lambda message: None)
-        figure, caption = captured[0]
+        figure, caption = captured["overall_performance"][0]
         assert len(figure.axes) == 4
         assert figure.axes[0].get_gridspec().get_geometry() == (2, 2)
         assert len({axis.get_ylim() for axis in figure.axes}) == 1
@@ -135,15 +158,45 @@ def test_overall_performance_uses_planned_levels_and_matched_panel_scores(monkey
                 means = matching.loc[matching.method.eq(method)].groupby("pretraining").auprc.mean()
                 np.testing.assert_allclose([bar.get_height() for bar in series], means.loc[list(plots.INITIALIZATIONS)])
 
+        tradeoff, caption = captured["privacy_utility"][0]
+        assert len(tradeoff.axes) == 4
+        assert tradeoff.axes[0].get_gridspec().get_geometry() == (2, 2)
+        assert len({axis.get_ylim() for axis in tradeoff.axes}) == 1
+        lower, upper = tradeoff.axes[0].get_ylim()
+        assert 0 < lower < min(axis.dataLim.ymin for axis in tradeoff.axes)
+        assert upper > max(axis.dataLim.ymax for axis in tradeoff.axes)
+        assert len(tradeoff.legends) == 1
+        assert [label.get_text() for label in tradeoff.legends[0].get_texts()] == [
+            "Scratch", "Unshifted pretraining", "Shifted pretraining"]
+        assert "independent sampling and noise" in caption
+        assert "2 repeats. 95% t intervals" in caption
+        for axis, (kind, (_, level, subtitle)) in zip(tradeoff.axes, scenarios.items()):
+            assert axis.texts[0].get_text() == subtitle
+            assert axis.get_legend() is None
+            matching = runs.loc[runs.shift_type.eq(kind) & runs.shift_fraction.eq(level) & runs.method.eq("dp_sgd")]
+            assert len(axis.containers) == len(plots.INITIALIZATIONS)
+            for initialization, series in zip(plots.INITIALIZATIONS, axis.containers):
+                means = matching.loc[matching.pretraining.eq(initialization)].groupby("comparison_epsilon").auprc.mean()
+                np.testing.assert_allclose(series.lines[0].get_xdata(), means.index)
+                np.testing.assert_allclose(series.lines[0].get_ydata(), means)
+                assert series.has_yerr
+
         report.run(path, progress=lambda message: None, shift="age_70_plus", fraction=.7, epsilon=.5)
-        single, caption = captured[1]
+        single, caption = captured["overall_performance"][1]
         assert len(single.axes) == 1
         assert single.axes[0].texts[0].get_text() == "70% of source patients aged ≥70"
         assert single.legends[0].get_texts()[1].get_text() == "DP-SGD (ε = 0.5)"
         assert "scores vary across panels" not in caption
+        single, caption = captured["privacy_utility"][1]
+        assert len(single.axes) == 1
+        assert single.axes[0].texts[0].get_text() == "70% of source patients aged ≥70"
+        np.testing.assert_allclose(single.axes[0].containers[2].lines[0].get_xdata(), [.5, 1])
+        np.testing.assert_allclose(single.axes[0].containers[2].lines[0].get_ydata(), [.335, .345])
+        assert "scores can vary across panels" not in caption
     finally:
-        for figure, _ in captured:
-            plots.plt.close(figure)
+        for figures in captured.values():
+            for figure, _ in figures:
+                plots.plt.close(figure)
 
 
 def test_amplification_shares_scale_and_legend_across_the_four_shift_panels(monkeypatch, tmp_path):

@@ -1,4 +1,4 @@
-"""Five research figures, faceted automatically by registered shift type."""
+"""Research figures, faceted automatically by registered shift type."""
 
 import os
 from pathlib import Path
@@ -16,12 +16,13 @@ from dp_shift.stages.common import atomic_path
 from .summarize import interval
 
 
-FIGURES = ("overall_performance", "pretraining_benefit", "dp_amplification", "privacy_utility", "source_target_prevalence")
+FIGURES = ("overall_performance", "pretraining_benefit", "dp_amplification", "privacy_utility",
+           "source_target_prevalence", "source_target_gap")
 INITIALIZATIONS = ("none", "baseline", "shifted")
-LABELS = ("Scratch", "Baseline-source\npretraining", "Shifted-source\npretraining")
 COLORS = ("#777777", "#28658c", "#bc6630")
 CI_NOTE = "95% t intervals across repeats on the fixed target test set."
-OVERALL_PANELS = {
+SINGLE_REPEAT_CI_NOTE = "Single repeat. Confidence intervals require multiple repeats."
+PERFORMANCE_PANELS = {
     "readmission": ("Readmission Prevalence", "{level} source readmission rate"),
     "age_70_plus": ("Age Distribution", "{level} of source patients aged ≥70"),
     "primary_diagnosis_circulatory": ("Primary Diagnosis", "{level} source replacement · Circulatory primary diagnosis"),
@@ -47,16 +48,11 @@ def save(figure, output, name, caption, *, layout_rect=(0, .12, 1, 1)):
         plt.close(figure)
 
 
-def panels(kinds, *, sharey=True):
-    figure, axes = plt.subplots(1, len(kinds), figsize=(6 * len(kinds), 5), sharey=sharey, squeeze=False)
-    return figure, axes[0]
-
-
-def panel_grid(count):
+def panel_grid(count, *, sharey=True):
     columns = min(2, count)
     rows = (count + columns - 1) // columns
     figure, grid = plt.subplots(rows, columns, figsize=(10.8 if columns == 2 else 7.4, 2.9 * rows + 2),
-                                sharey=True, squeeze=False)
+                                sharey=sharey, squeeze=False)
     axes = grid.ravel()
     for axis in axes[count:]:
         figure.delaxes(axis)
@@ -79,17 +75,12 @@ def line(axis, points, label, color, scale=1, *, fmt="o-", linewidth=1.5, marker
                   label=label, capsize=3, linewidth=linewidth, markersize=markersize)
 
 
-def condition_title(kind, fraction):
-    shift = SHIFTS[kind]
-    level = f"{fraction:.1%} replaced" if shift.replacement_rate else f"source share {fraction:.1%}"
-    return f"{shift.label} · {level}"
-
-
-def overall_panel_title(axis, kind, data):
+def performance_panel_title(axis, kind, data):
     shift = SHIFTS[kind]
     default_subtitle = "{level} source replacement" if shift.replacement_rate else "{level} source subgroup share"
-    title, subtitle = OVERALL_PANELS.get(kind, (shift.label, default_subtitle))
-    shares = data.pivot(index=["repeat", "method"], columns="pretraining", values="source_fraction")
+    title, subtitle = PERFORMANCE_PANELS.get(kind, (shift.label, default_subtitle))
+    shares = data.pivot(index=["comparison_epsilon", "repeat", "method"],
+                        columns="pretraining", values="source_fraction")
     achieved = shares["shifted"]
     if shift.replacement_rate:
         # Every replacement adds one subgroup member while keeping the source size fixed.
@@ -115,7 +106,7 @@ def overall_performance(runs, output, epsilon, fractions, note=CI_NOTE):
         axis.set(xticks=x, xticklabels=("Scratch", "Unshifted", "Shifted"), xlim=(-.5, 2.5))
         axis.set_axisbelow(True)
         axis.grid(axis="y", color="#dbe3ec", linewidth=.7, alpha=.75)
-        overall_panel_title(axis, kind, data)
+        performance_panel_title(axis, kind, data)
     highest = max(axis.dataLim.ymax for axis in axes)
     axes[0].set_ylim(0, max(axes[0].get_ylim()[1], 1.08 * highest))
     figure.suptitle("Overall Target-Test Performance Across Training Conditions",
@@ -240,20 +231,40 @@ def dp_amplification(effects, output, budgets, colors, baselines, note=CI_NOTE):
          layout_rect=(.02, .58 / height, .985, 1 - (1.54 + extra_legend_height) / height))
 
 
-def privacy_utility(runs, output, budgets, fractions, note=CI_NOTE):
-    figure, axes = panels(fractions)
-    for axis, (kind, fraction) in zip(axes, fractions.items()):
-        data = runs.loc[runs.shift_type.eq(kind) & runs.method.eq("dp_sgd") & runs.shift_fraction.eq(fraction)]
-        for initialization, label, color in zip(INITIALIZATIONS, LABELS, COLORS):
+def privacy_utility(runs, output, budgets, fractions):
+    figure, axes = panel_grid(len(fractions))
+    height = figure.get_figheight()
+    selected = runs.loc[runs.method.eq("dp_sgd") & runs.shift_fraction.eq(runs.shift_type.map(fractions))]
+    labels = ("Scratch", "Unshifted pretraining", "Shifted pretraining")
+    for axis, kind in zip(axes, fractions):
+        data = selected.loc[selected.shift_type.eq(kind)]
+        for initialization, label, color, marker in zip(INITIALIZATIONS, labels, COLORS, ("o", "s", "^")):
             group = data.loc[data.pretraining.eq(initialization)]
             line(axis, [(budget, values.auprc) for budget, values in group.groupby("comparison_epsilon")],
-                 label.replace("\n", " "), color)
-        axis.set(xticks=budgets, xlabel="Privacy budget ε (smaller = stronger privacy)", ylabel="Target-test AUPRC",
-                 title=condition_title(kind, fraction))
-        axis.grid(alpha=.15)
-        axis.legend(frameon=False, fontsize=8)
-    figure.suptitle("Privacy–utility tradeoff")
-    save(figure, output, "privacy_utility", "DP-SGD only; nonprivate SGD is not assigned an epsilon value.\n" + note)
+                 label, color, fmt=f"{marker}-", linewidth=1, markersize=5)
+        axis.set(xticks=budgets, xticklabels=[f"{budget:g}" for budget in budgets], xlabel="Privacy budget (ε)")
+        axis.margins(y=.08)
+        axis.set_axisbelow(True)
+        axis.grid(axis="y", color="#dbe3ec", linewidth=.7, alpha=.75)
+        performance_panel_title(axis, kind, data)
+
+    figure.suptitle("How Does Privacy Strength Affect Model Performance?",
+                    fontsize=18 if len(axes) > 1 else 15, fontweight="bold", color="#172332", y=1 - .20 / height)
+    figure.text(.5, 1 - .62 / height, "Target-test AUPRC under DP-SGD · Smaller ε means stronger privacy",
+                ha="center", fontsize=10, color="#505963")
+    figure.supylabel("Target-test AUPRC", x=.02, fontsize=11)
+    figure.legend(*axes[0].get_legend_handles_labels(), title="Training condition", ncols=3, loc="upper center",
+                  bbox_to_anchor=(.5, 1 - .76 / height), frameon=False)
+
+    caption = ["Pretraining benefit = Unshifted − Scratch. Shift effect = Shifted − Unshifted."]
+    references = selected.loc[selected.pretraining.ne("shifted")]
+    if references.groupby(["comparison_epsilon", "repeat", "pretraining"]).auprc.nunique().gt(1).any():
+        caption.append("Scratch and unshifted scores can vary across panels because DP-SGD runs use independent sampling and noise.")
+    repeats = selected.repeat.nunique()
+    uncertainty = f"{repeats} repeats. {CI_NOTE}" if repeats > 1 else SINGLE_REPEAT_CI_NOTE
+    caption.append(f"The shared AUPRC axis is zoomed to the plotted data. {uncertainty}")
+    save(figure, output, "privacy_utility", "\n".join(caption),
+         layout_rect=(.02, (.22 + .12 * len(caption)) / height, .985, 1 - 1.24 / height))
 
 
 def size_label(values):
@@ -261,31 +272,102 @@ def size_label(values):
     return f"n={low:,}" if low == high else f"n={low:,}–{high:,}"
 
 
-def source_target_prevalence(runs, output, target_size, fractions, note=""):
-    figure, axes = panels(fractions, sharey=False)
-    for axis, (kind, fraction) in zip(axes, fractions.items()):
-        data = runs.loc[runs.shift_type.eq(kind) & runs.method.eq("sgd") & runs.comparison_epsilon.eq(runs.comparison_epsilon.min())]
-        reference = data.loc[data.shift_fraction.eq(fraction) & data.pretraining.eq("baseline")]
-        target = data.test_fraction.iloc[0]
-        labels = [f"Target test\nn={target_size:,}", f"Baseline\n{size_label(reference.source_size)}"]
-        values = [[target], reference.source_fraction.to_numpy()]
-        for value, group in data.loc[data.pretraining.eq("shifted")].groupby("shift_fraction"):
-            level = f"{value:.1%} replaced" if SHIFTS[kind].replacement_rate else f"{value:.1%}"
-            labels.append(f"{level}\n{size_label(group.source_size)}")
-            values.append(group.source_fraction.to_numpy())
-        positions = np.arange(len(labels))
-        axis.bar(positions, [np.mean(value) for value in values], color=[COLORS[0], COLORS[1], *[COLORS[2]] * (len(labels) - 2)], alpha=.8)
-        for x, observed in zip(positions[1:], values[1:]):
-            axis.scatter(x + np.linspace(-.07, .07, len(observed)), observed, s=15, color="#333333", zorder=3)
-        axis.axhline(target, color="#555555", linestyle="--", linewidth=1, label=f"Target test: {target:.1%}")
-        axis.set(xticks=positions, xticklabels=labels, ylabel="Patients with characteristic", title=SHIFTS[kind].label)
+def composition_bars(axis, x, means, errors, *, width):
+    for points, color, label in ((slice(0, 1), COLORS[1], "Unshifted source"),
+                                 (slice(1, None), COLORS[2], "Shifted source")):
+        axis.bar(x[points], means[points], width=width, yerr=None if errors is None else errors[:, points].tolist(),
+                 color=color, label=label, capsize=3)
+
+
+def source_target_prevalence(composition, output, caption):
+    figure, axes = panel_grid(len(composition), sharey=False)
+    height = figure.get_figheight()
+    for axis, (kind, (target, levels, means, errors)) in zip(axes, composition.items()):
+        shift = SHIFTS[kind]
+        title, description, _ = SOURCE_SHIFT_PANELS.get(kind, (shift.label, "", ""))
+        separator = "\n" if len(levels) > 3 else " "
+        suffix = f"{separator}replaced" if shift.replacement_rate else ""
+        x = np.arange(len(means))
+        composition_bars(axis, x, means, errors, width=.58)
+        axis.axhline(target, color="#415268", linestyle="--", linewidth=1)
+        axis.annotate(f"Target: {target:.1%}", (1, target), xycoords=axis.get_yaxis_transform(),
+                      xytext=(-5, 5), textcoords="offset points", ha="right", fontsize=8, color="#415268",
+                      bbox={"facecolor": "white", "edgecolor": "none", "pad": 1.5})
+        axis.set(xticks=x, xticklabels=["Unshifted", *[f"{level}{suffix}" for level in levels]])
+        axis.margins(x=.24, y=.16)
         axis.yaxis.set_major_formatter(PercentFormatter(1))
-        axis.tick_params(axis="x", labelsize=8)
-        axis.grid(axis="y", alpha=.15)
-        axis.legend(frameon=False)
-    figure.suptitle("Observed source–target composition")
-    save(figure, output, "source_target_prevalence",
-         "Bars: observed percentages averaged across repeats. Dots: source repeats.\nThe target test population is fixed; source sample sizes are shown below each bar." + ("\n" + note if note else ""))
+        axis.set_axisbelow(True)
+        axis.grid(axis="y", color="#dbe3ec", linewidth=.7, alpha=.75)
+        axis.set_title(title, loc="left", pad=20 if description else 8, fontweight="bold", color="#172332")
+        if description:
+            axis.text(0, 1.02, description, transform=axis.transAxes, va="bottom", fontsize=9, color="#505963")
+
+    figure.suptitle("Source and Target Population Characteristics",
+                    fontsize=18 if len(axes) > 1 else 15, fontweight="bold", color="#172332", y=1 - .20 / height)
+    figure.text(.5, 1 - .62 / height, "Observed characteristic prevalence before and after source shifting",
+                ha="center", fontsize=10, color="#505963")
+    figure.supylabel("Patients with characteristic (%)", x=.02, fontsize=11)
+    figure.legend(*axes[0].get_legend_handles_labels(), ncols=2, loc="upper center",
+                  bbox_to_anchor=(.5, 1 - .77 / height), frameon=False)
+    scale_note = "Y-axis scales differ by panel.\n" if len(axes) > 1 else ""
+    save(figure, output, "source_target_prevalence", scale_note + caption,
+         layout_rect=(.02, .46 / height, .985, 1 - 1.09 / height))
+
+
+def source_target_gap(composition, output, caption):
+    figure, axis = plt.subplots(figsize=(max(7.4, 2.65 * len(composition)), 4.9))
+    height = figure.get_figheight()
+    labels = []
+    slot = .8 / max(len(means) for _, _, means, _ in composition.values())
+    for index, (kind, (target, levels, means, errors)) in enumerate(composition.items()):
+        shift = SHIFTS[kind]
+        title = PERFORMANCE_PANELS.get(kind, (shift.label, ""))[0]
+        suffix = " replaced" if shift.replacement_rate else ""
+        labels.append(f"{title}\n{' / '.join(levels)}{suffix}")
+        offsets = (np.arange(len(means)) - (len(means) - 1) / 2) * slot
+        composition_bars(axis, index + offsets, 100 * (means - target),
+                         None if errors is None else 100 * errors, width=.8 * slot)
+
+    axis.axhline(0, color="#415268", linewidth=1.3, zorder=.9)
+    axis.set(xticks=np.arange(len(labels)), xticklabels=labels, xlim=(-.5, len(labels) - .5),
+             ylabel="Source minus target prevalence (percentage points)")
+    axis.margins(y=.12)
+    axis.set_axisbelow(True)
+    axis.grid(axis="y", color="#dbe3ec", linewidth=.7, alpha=.75)
+    figure.suptitle("How Different Is the Source Population from the Target?",
+                    fontsize=17 if len(composition) > 1 else 15, fontweight="bold", color="#172332",
+                    y=1 - .20 / height)
+    figure.text(.5, 1 - .62 / height, "Difference in observed characteristic prevalence by source condition",
+                ha="center", fontsize=10, color="#505963")
+    handles, legend_labels = axis.get_legend_handles_labels()
+    figure.legend(handles[:2], legend_labels[:2], ncols=2, loc="upper center",
+                  bbox_to_anchor=(.5, 1 - .77 / height), frameon=False)
+    save(figure, output, "source_target_gap",
+         "Positive gaps mean higher source prevalence. Negative gaps mean higher target prevalence. Zero means equal shares.\n"
+         "Shifted bars follow the listed levels from left to right.\n" + caption,
+         layout_rect=(.02, .58 / height, .985, 1 - 1.09 / height))
+
+
+def source_target_composition(runs, output, target_size, fractions):
+    # The cohort records are repeated across methods and privacy budgets.
+    cohorts = runs.loc[runs.method.eq("sgd") & runs.comparison_epsilon.eq(runs.comparison_epsilon.min())
+                       & runs.shift_type.isin(fractions)]
+    baseline = cohorts.pretraining.eq("baseline") & cohorts.shift_fraction.eq(cohorts.shift_type.map(fractions))
+    source = cohorts.loc[baseline | cohorts.pretraining.eq("shifted")]
+    composition = {}
+    for kind in fractions:
+        data = source.loc[source.shift_type.eq(kind)]
+        unshifted = data.loc[data.pretraining.eq("baseline"), "source_fraction"]
+        shifted = data.loc[data.pretraining.eq("shifted")].groupby("shift_fraction").source_fraction
+        levels, values = zip(*shifted)
+        means, errors = estimates([unshifted, *values])
+        composition[kind] = (data.test_fraction.iloc[0], [f"{100 * level:g}%" for level in levels], means, errors)
+
+    repeats = source.repeat.nunique()
+    uncertainty = f"Means and 95% t intervals across {repeats} repeats." if repeats > 1 else SINGLE_REPEAT_CI_NOTE
+    caption = f"Source {size_label(source.source_size)} per cohort. Fixed target test n={target_size:,}. {uncertainty}"
+    source_target_prevalence(composition, output, caption)
+    source_target_gap(composition, output, caption)
 
 
 def plot(runs, effects, target_size, output, epsilon, fractions, *, overall_fractions=None):
@@ -293,16 +375,16 @@ def plot(runs, effects, target_size, output, epsilon, fractions, *, overall_frac
     note = "Single repeat; uncertainty not estimated." if single else CI_NOTE
     budgets = sorted(runs.comparison_epsilon.unique())
     colors = dict(zip(budgets, plt.get_cmap("viridis")(np.linspace(.15, .8, len(budgets)))))
+    performance_fractions = fractions if overall_fractions is None else overall_fractions
     baselines = {kind: 0.0 if SHIFTS[kind].replacement_rate else
                  runs.loc[runs.shift_type.eq(kind) & runs.method.eq("sgd") & runs.pretraining.eq("baseline")
                                & runs.comparison_epsilon.eq(budgets[0]) & runs.shift_fraction.eq(fraction), "source_fraction"].mean()
                  for kind, fraction in fractions.items()}
     with plt.rc_context({"font.family": "DejaVu Sans", "font.size": 9,
                          "axes.spines.top": False, "axes.spines.right": False}):
-        overall_performance(runs, output, epsilon, fractions if overall_fractions is None else overall_fractions,
-                            note=note)
+        overall_performance(runs, output, epsilon, performance_fractions, note=note)
         pretraining_benefit(effects, output, budgets, colors, baselines, fractions, note=note)
         dp_amplification(effects, output, budgets, colors, baselines, note=note)
-        privacy_utility(runs, output, budgets, fractions, note=note)
-        source_target_prevalence(runs, output, target_size, fractions, note=note if single else "")
+        privacy_utility(runs, output, budgets, performance_fractions)
+        source_target_composition(runs, output, target_size, fractions)
     return len(FIGURES)

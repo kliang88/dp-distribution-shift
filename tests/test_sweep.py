@@ -220,7 +220,7 @@ def test_grid_recovers_verifies_and_retains_csv_data(experiment, monkeypatch, ca
     assert not (output / "plots").exists()
     csv_hash = file_hash(output / tables.RUNS_FILE)
     main(["plot", "--input", str(output / "data")])
-    assert len(list((output / "plots").rglob("*.png"))) == 5
+    assert len(list((output / "plots").rglob("*.png"))) == 6
     assert (output / "plots/dp_amplification.png").is_file()
     assert csv_hash == file_hash(output / tables.RUNS_FILE)
     assert verify(output)["evaluated_models"] == 48

@@ -190,7 +190,7 @@ def test_infeasible_diagnosis_shift_is_audited_before_training(experiment, monke
     assert audit.reason.str.contains("at most 0 are possible").all()
 
 
-def test_mixed_sweep_preserves_controls_and_creates_five_faceted_figures(experiment, monkeypatch):
+def test_mixed_sweep_preserves_controls_and_creates_composition_figures(experiment, monkeypatch):
     from dp_shift.cli import main
     from dp_shift.data.audit import SHIFT_AUDIT_FILE
     from dp_shift.evaluation import tables, plots
@@ -252,14 +252,23 @@ def test_mixed_sweep_preserves_controls_and_creates_five_faceted_figures(experim
                     assert axis.containers[1].lines[0].get_xdata()[0] == 0
                 else:
                     assert axis.containers[0].lines[0].get_xdata()[0] == 0
+        if name == "source_target_prevalence":
+            assert figure.axes[0].get_gridspec().get_geometry() == (2, 2)
+            assert len({axis.get_ylim() for axis in figure.axes}) > 1
+            assert len(figure.legends) == 1
+            assert figure.axes[2].get_xticklabels()[1].get_text() == "10% replaced"
+        if name == "source_target_gap":
+            assert len(figure.legends) == 1
+            assert len(figure.axes[0].get_xticklabels()) == 4
         original_save(figure, directory, name, caption, **kwargs)
 
     with monkeypatch.context() as patch:
         patch.setattr(plots, "save", inspect)
         main(["plot", "--input", str(output)])
     assert set(captured) == set(plots.FIGURES)
+    assert captured.pop("source_target_gap") == 1
     assert set(captured.values()) == {4}
     main(["plot", "--input", str(output), "--output", str(output / "age_plots"), "--shift", "age_70_plus", "--fraction", ".7"])
-    assert len(list((output / "age_plots").glob("*.png"))) == 5
+    assert len(list((output / "age_plots").glob("*.png"))) == 6
     assert csv_hash == file_hash(output / tables.RUNS_FILE)
     assert verify(output)["evaluated_models"] == 48
