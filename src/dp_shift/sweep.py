@@ -12,7 +12,7 @@ from .data.utils import file_hash, read_json, require
 from .stages.common import atomic_json, owned_workspace, remove_workspace
 
 
-FORMAT = "dp-shift-experiment-runs-v2"
+FORMAT = "dp-shift-experiment-runs-v3"
 
 
 def experiment(base, fraction, epsilon, *, shift_type=None):

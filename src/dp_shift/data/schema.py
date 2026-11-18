@@ -8,6 +8,7 @@ import pandas as pd
 
 from dp_shift.config import PROTOCOL, ResolvedConfig
 
+from .features import FIXED_CATEGORIES
 from .utils import file_hash, require
 from .shifts import SHIFTS, members
 
@@ -28,7 +29,7 @@ def load_and_validate_raw(path, config: ResolvedConfig, expected_hash):
         header = next(csv.reader(stream), [])
     require(bool(header), "Empty records CSV")
     require(len(header) == len(set(header)), "Duplicate CSV column names")
-    features = list(PROTOCOL.numeric_features) + list(PROTOCOL.categorical_features)
+    features = [*PROTOCOL.numeric_features, *PROTOCOL.categorical_features, *FIXED_CATEGORIES]
     required = list(dict.fromkeys(["patient_nbr", "encounter_id", "readmitted", *features,
                                    *SHIFTS[config.requested.source_conditions.shift_type].columns]))
     require(set(required).issubset(header), f"Missing required columns: {set(required) - set(header)}")

@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from dp_shift.config import PROTOCOL
+from dp_shift.data.features import DIAGNOSIS_COLUMNS
 from dp_shift.data.prepare import build
 from dp_shift.data.utils import read_json, write_json
 
@@ -23,6 +24,8 @@ def experiment(tmp_path, monkeypatch):
     records = pd.DataFrame({name: np.arange(n) % (i+3) for i, name in enumerate(list(PROTOCOL.numeric_features))})
     for name in PROTOCOL.categorical_features:
         records[name] = "1" if name in PROTOCOL.categorical_ids else "known"
+    records[list(DIAGNOSIS_COLUMNS)] = "250.83"
+    records["insulin"] = "No"
     records["age"] = np.where(np.arange(n) % 2 == 0, "[70-80)", "[50-60)")
     records["number_inpatient"] = np.where(np.arange(n) % 5 == 0, 2, 0)
     records["patient_nbr"], records["encounter_id"] = np.arange(n), np.arange(n) + 1000

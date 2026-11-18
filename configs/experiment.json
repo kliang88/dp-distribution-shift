@@ -11,7 +11,7 @@
   },
   "pretraining": {
     "sample_size": 20000,
-    "epochs": 12
+    "epochs": 32
   },
   "privacy": {
     "clipping_norm": 1.0

@@ -10,11 +10,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from dp_shift.config import PROTOCOL, resolve_config
+from dp_shift.config import PARTITIONS, PROTOCOL, resolve_config
 from dp_shift.sweep import load_plan
 from dp_shift.data.artifacts import (PATH_IDS, load_evaluation_data, load_training_data,
                                      validate_evaluation_manifest, verify_artifacts)
 from dp_shift.data.cohort import build_cohort
+from dp_shift.data.features import DIAGNOSIS_COLUMNS, FIXED_CATEGORIES, diagnosis_category
 from dp_shift.data.prepare import build, materialize_test
 from dp_shift.data.preprocessing import (fit_source_transformer, transform_features,
                                          transformer_metadata)
@@ -38,6 +39,8 @@ def make_frame(n, config):
                           for i, name in enumerate(list(PROTOCOL.numeric_features))})
     for name in PROTOCOL.categorical_features:
         frame[name] = "1" if name in PROTOCOL.categorical_ids else "known"
+    frame[list(DIAGNOSIS_COLUMNS)] = "250.83"
+    frame["insulin"] = "No"
     frame["patient_nbr"] = np.arange(n, dtype=np.int64) + 1
     frame["encounter_id"] = np.arange(n, dtype=np.int64) + 1000
     frame["y"] = (np.arange(n) % 3 == 0).astype(np.int64)
@@ -66,14 +69,38 @@ def test_raw_parser_preserves_large_integer_ids_and_literal_categories(tmp_path,
     frame["patient_nbr"] = [9007199254740993, 9007199254740994]
     frame["race"] = ["None", "?"]
     frame["admission_type_id"] = ["1.0", "2"]
+    frame["diag_1"] = ["001.2", "V45.85"]
     path = tmp_path / "records.csv"
     save_raw(frame, path)
     result = load_and_validate_raw(path, config, file_hash(path))
     assert result.patient_nbr.tolist() == frame.patient_nbr.tolist()
     assert result.admission_type_id.tolist() == ["1", "2"]
     assert result.race.iloc[0] == "None" and pd.isna(result.race.iloc[1])
+    assert result.diag_1.tolist() == ["001.2", "V45.85"]
     assert result.y.tolist() == [1, 0]
     assert "readmitted" not in result
+
+
+@pytest.mark.parametrize("feature", FIXED_CATEGORIES)
+def test_raw_parser_requires_expanded_features(tmp_path, config, feature):
+    path = tmp_path / "records.csv"
+    save_raw(make_frame(2, config).drop(columns=feature), path)
+    with pytest.raises(ValueError, match=f"Missing required columns: .*{feature}"):
+        load_and_validate_raw(path, config, file_hash(path))
+
+
+@pytest.mark.parametrize("code,category", [
+    ("001.2", "Infectious"), ("139", "Infectious"), ("140", "Neoplasm"),
+    ("249", "Other"), ("250.83", "Diabetes"), ("251", "Other"), ("272.4", "Other"),
+    ("414.01", "Circulatory"), ("460", "Respiratory"), ("520", "Digestive"),
+    ("580", "Genitourinary"), ("710", "Musculoskeletal"), ("786.50", "Symptoms"),
+    ("999", "Injury"), (" v45.85 ", "V_code"), ("V91", "V_code"), ("E888.9", "E_code"),
+    (None, "Missing"), (np.nan, "Missing"), ("?", "Missing"), (" n/a ", "Missing"),
+    ("000", "Invalid"), ("ABC", "Invalid"), ("250.X", "Invalid"), ("1000", "Invalid"),
+    ("V00", "Invalid"), ("V99", "Invalid"), ("E888.99", "Invalid"),
+])
+def test_diagnosis_category(code, category):
+    assert diagnosis_category(code) == category
 
 
 @pytest.mark.parametrize("column,value,error", [
@@ -153,6 +180,26 @@ def test_preprocessing_uses_source_statistics_and_survives_unseen_categories(tmp
         fit_source_transformer(source)
 
 
+def test_fixed_categories_encode_values_absent_from_source(config):
+    source = make_frame(4, config)
+    transformer = fit_source_transformer(source)
+    metadata = transformer_metadata(transformer, source)
+    target = make_frame(2, config)
+    target["diag_1"] = ["V45.85", "414.01"]
+    target["diag_2"] = ["E888.9", "272.4"]
+    target["diag_3"] = ["bad", "?"]
+    target["insulin"] = ["Up", "unknown"]
+    transformed = transform_features(transformer, target)
+    expected = {"diag_1": ["V_code", "Circulatory"], "diag_2": ["E_code", "Other"],
+                "diag_3": ["Invalid", "Missing"], "insulin": ["Up", "Missing"]}
+    for feature, categories in FIXED_CATEGORIES.items():
+        assert metadata["categories"][feature] == list(categories)
+        names = [f"fixed_categorical__{feature}_{category}" for category in categories]
+        indices = [metadata["feature_names"].index(name) for name in names]
+        np.testing.assert_array_equal(transformed[:, indices],
+                                      np.equal.outer(expected[feature], categories))
+
+
 def test_manifest_lookup_aligns_rows_by_id(config):
     frame = make_frame(10, config)
     membership = manifest(frame.iloc[[8, 1, 6]])
@@ -209,6 +256,24 @@ def test_real_data_build_and_reproducibility(prepared, tmp_path):
             relative = f"source_pairs/repeat_{repeat:02d}/{name}.csv"
             assert (output / relative).read_bytes() == (second / relative).read_bytes()
     assert build(output.parent / "config.json", output) == summary  # Existing matching artifacts are reused.
+
+
+def test_diagnosis_audit_covers_cohort_partitions_and_source_samples(prepared):
+    output, summary = prepared
+    audit = pd.read_csv(output / "audit/diagnosis_category_counts.csv")
+    cohort = audit[audit.scope.eq("cohort")]
+    partitions = audit[audit.scope.eq("partition")]
+    samples = audit[audit.scope.eq("source_sample")]
+    assert len(cohort) == 9 and cohort.total.eq(summary["patients"]).all()
+    assert set(partitions.partition) == set(PARTITIONS)
+    assert partitions.groupby("partition").size().eq(9).all()
+    assert set(samples.condition) == {"s0", "s1"}
+    assert len(samples) == 18 * summary["source_pairs"]
+    assert samples.groupby(["repeat", "condition"]).size().eq(9).all()
+    assert set(audit.feature) == set(DIAGNOSIS_COLUMNS)
+    assert set(audit.category) == {"Missing", "Invalid", "Other"}
+    assert audit["count"].between(0, audit.total).all()
+    np.testing.assert_allclose(audit.fraction, audit["count"] / audit.total)
 
 
 def test_artifact_corruption_and_incomplete_output_are_rejected(prepared, tmp_path):

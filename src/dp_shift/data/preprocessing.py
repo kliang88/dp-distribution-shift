@@ -8,8 +8,10 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
 
-from .utils import require
 from dp_shift.config import PROTOCOL
+
+from .features import FIXED_CATEGORIES, normalize_fixed_categories
+from .utils import require
 
 
 def log_columns(values, indices):
@@ -34,8 +36,13 @@ def fit_source_transformer(source_pool):
             ("encode", OneHotEncoder(drop=None, handle_unknown="ignore", sparse_output=False,
                                      dtype=np.float32)),
         ]), list(PROTOCOL.categorical_features)),
+        ("fixed_categorical", Pipeline([
+            ("normalize", FunctionTransformer(normalize_fixed_categories, feature_names_out="one-to-one")),
+            ("encode", OneHotEncoder(categories=[list(values) for values in FIXED_CATEGORIES.values()],
+                                     sparse_output=False, dtype=np.float32)),
+        ]), list(FIXED_CATEGORIES)),
     ], remainder="drop", sparse_threshold=0)
-    transformer.fit(source_pool[numeric + list(PROTOCOL.categorical_features)])
+    transformer.fit(source_pool[[*numeric, *PROTOCOL.categorical_features, *FIXED_CATEGORIES]])
     return transformer
 
 
@@ -48,6 +55,7 @@ def transform_features(transformer, frame):
 def transformer_metadata(transformer, source_pool):
     numeric = transformer.named_transformers_["numeric"]
     encoder = transformer.named_transformers_["categorical"].named_steps["encode"]
+    fixed_encoder = transformer.named_transformers_["fixed_categorical"].named_steps["encode"]
     names = transformer.get_feature_names_out().tolist()
     return {
         "feature_names": names,
@@ -57,8 +65,9 @@ def transformer_metadata(transformer, source_pool):
         "medians": numeric.named_steps["impute"].statistics_.tolist(),
         "means": numeric.named_steps["scale"].mean_.tolist(),
         "scales": numeric.named_steps["scale"].scale_.tolist(),
-        "categories": {name: values.tolist() for name, values in
-                       zip(PROTOCOL.categorical_features, encoder.categories_)},
+        "categories": {name: values.tolist() for name, values in zip(
+            (*PROTOCOL.categorical_features, *FIXED_CATEGORIES),
+            (*encoder.categories_, *fixed_encoder.categories_), strict=True)},
         "fit_patient_n": len(source_pool),
         "fit_patient_ids_sha256": hashlib.sha256(
             source_pool.patient_nbr.to_numpy(dtype="<i8").tobytes()).hexdigest(),
