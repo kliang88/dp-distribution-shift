@@ -309,7 +309,7 @@ def test_single_repeat_experiment_and_plots(experiment, monkeypatch):
     original_save = plots.save
     captions = []
 
-    def inspect(figure, destination, name, caption):
+    def inspect(figure, destination, name, caption, **kwargs):
         captions.append(caption)
         for axis in figure.axes:
             for container in axis.containers:
@@ -317,7 +317,7 @@ def test_single_repeat_experiment_and_plots(experiment, monkeypatch):
                     assert not container.has_yerr
                 if hasattr(container, 'errorbar'):
                     assert container.errorbar is None
-        original_save(figure, destination, name, caption)
+        original_save(figure, destination, name, caption, **kwargs)
 
     monkeypatch.setattr(plots, 'save', inspect)
     main(['plot', '--input', str(output)])

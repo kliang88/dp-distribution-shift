@@ -28,7 +28,7 @@ def test_five_figures_use_paired_repeats_and_positive_amplification(monkeypatch,
                                     test_fraction=.1, test_size=100))
     runs = pd.DataFrame(raw)
     captured = {}
-    monkeypatch.setattr(plots, "save", lambda figure, output, name, caption: captured.update({name: figure}))
+    monkeypatch.setattr(plots, "save", lambda figure, output, name, caption, **kwargs: captured.update({name: figure}))
     try:
         count = plots.plot(runs, paired_effects(runs), 100, tmp_path, epsilon=5., fractions={"readmission": .2})
         assert count == 5 and set(captured) == set(plots.FIGURES)
@@ -62,12 +62,13 @@ def test_five_figures_use_paired_repeats_and_positive_amplification(monkeypatch,
             plots.plt.close(figure)
 
 
-def test_amplification_compares_budgets_with_separate_characteristic_axes(monkeypatch, tmp_path):
-    from dp_shift.data.shifts import SHIFTS
+def test_amplification_shares_scale_and_legend_across_the_four_shift_panels(monkeypatch, tmp_path):
     from dp_shift.evaluation import plots
 
-    baselines = {"readmission": .09, "age_70_plus": .44, "prior_inpatient_2_plus": .034}
-    fractions = {"readmission": [.01, .17], "age_70_plus": [.5, .9], "prior_inpatient_2_plus": [.04, .08]}
+    baselines = {"readmission": .09, "age_70_plus": .44,
+                 "primary_diagnosis_circulatory": 0, "clinical_complexity_2plus": 0}
+    fractions = {"readmission": [.01, .17], "age_70_plus": [.5, .9],
+                 "primary_diagnosis_circulatory": [.05, .1], "clinical_complexity_2plus": [.05, .2]}
     budgets = [1., 5., 10.]
     rows = []
     for index, (kind, levels) in enumerate(fractions.items()):
@@ -78,18 +79,35 @@ def test_amplification_compares_budgets_with_separate_characteristic_axes(monkey
                                      repeat=repeat,
                                      dp_amplification=(index + 1) * (level + 1) * .01 + budget * .001 + (repeat - 1) * .001))
     captured = []
-    monkeypatch.setattr(plots, "save", lambda figure, *args: captured.append(figure))
+    monkeypatch.setattr(plots, "save", lambda figure, *args, **kwargs: captured.append(figure))
     try:
         plots.dp_amplification(pd.DataFrame(rows), tmp_path, budgets,
                                dict(zip(budgets, ["red", "green", "blue"])), baselines)
-        axes = captured[0].axes
-        assert len(axes) == 3
+        figure = captured[0]
+        axes = figure.axes
+        assert len(axes) == 4
+        assert axes[0].get_gridspec().get_geometry() == (2, 2)
+        assert len(figure.legends) == 1
+        assert figure.legends[0].get_title().get_text() == "DP-SGD privacy budget"
+        assert [label.get_text() for label in figure.legends[0].get_texts()] == ["ε=1", "ε=5", "ε=10"]
+        assert sum("No additional DP effect" in text.get_text() for text in figure.texts) == 1
         for index, (axis, (kind, baseline)) in enumerate(zip(axes, baselines.items())):
-            assert axis.get_title() == SHIFTS[kind].label
+            title, description, xlabel = plots.AMPLIFICATION_PANELS[kind]
+            assert axis.get_title(loc="left") == title
+            assert description in {text.get_text() for text in axis.texts}
+            assert axis.get_xlabel() == xlabel
             assert axis.get_ylim() == axes[0].get_ylim()
-            assert "Source share" in axis.get_xlabel()
-            labels = set(axis.get_legend_handles_labels()[1])
-            assert labels == {"ε=1", "ε=5", "ε=10", f"Baseline source: {baseline:.1%}"}
+            assert axis.get_legend() is None
+            zero_guides = [line for line in axis.lines if line.get_linestyle() == "--"]
+            assert len(zero_guides) == 1
+            np.testing.assert_allclose(zero_guides[0].get_ydata(), [0, 0])
+            baselines_guides = [line for line in axis.lines if line.get_linestyle() == ":"]
+            if baseline:
+                assert len(baselines_guides) == 1
+                np.testing.assert_allclose(baselines_guides[0].get_xdata(), [baseline, baseline])
+            else:
+                assert not baselines_guides
+                assert any(label.get_text() == "0%\nUnshifted source" for label in axis.get_xticklabels())
             for budget, container in zip(budgets, axis.containers):
                 expected = sorted([(baseline, 0), *[(fraction, (index + 1) * (level + 1) + budget * .1)
                                                    for level, fraction in enumerate(fractions[kind])]])
@@ -100,7 +118,7 @@ def test_amplification_compares_budgets_with_separate_characteristic_axes(monkey
                         np.testing.assert_allclose(segment[:, 1], 0)
                     else:
                         assert segment[1, 1] > segment[0, 1]
-        assert len({axis.get_xlim() for axis in axes}) == 3
+        assert len({axis.get_xlim() for axis in axes}) == 4
     finally:
         for figure in captured:
             plots.plt.close(figure)

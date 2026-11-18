@@ -21,12 +21,20 @@ INITIALIZATIONS = ("none", "baseline", "shifted")
 LABELS = ("Scratch", "Baseline-source\npretraining", "Shifted-source\npretraining")
 COLORS = ("#777777", "#28658c", "#bc6630")
 CI_NOTE = "95% t intervals across repeats on the fixed target test set."
+AMPLIFICATION_PANELS = {
+    "readmission": ("Readmission Prevalence Shift", "Share readmitted within 30 days", "Source readmission rate (%)"),
+    "age_70_plus": ("Patient Age Distribution Shift", "Share of patients aged ≥70", "Source patients aged ≥70 (%)"),
+    "primary_diagnosis_circulatory": ("Primary Diagnosis Shift", "Oversample circulatory primary diagnoses",
+                                      "Source patients replaced (%)"),
+    "clinical_complexity_2plus": ("Clinical Complexity Shift", "Oversample patients with ≥2 distinct diagnosis groups",
+                                  "Source patients replaced (%)"),
+}
 
 
-def save(figure, output, name, caption):
+def save(figure, output, name, caption, *, layout_rect=(0, .12, 1, 1)):
     try:
         figure.text(.5, .015, caption, ha="center", fontsize=8, color="#505963")
-        figure.tight_layout(rect=(0, .12, 1, 1))
+        figure.tight_layout(rect=layout_rect)
         with atomic_path(Path(output) / f"{name}.png") as temporary:
             figure.savefig(temporary, dpi=300, bbox_inches="tight")
     finally:
@@ -107,22 +115,70 @@ def pretraining_benefit(effects, output, budgets, colors, baselines, fractions, 
          "Pretrained − scratch; positive means pretraining helps. Squares: baseline-source benefit.\n" + note)
 
 
+def amplification_axis(axis, kind, baseline):
+    shift = SHIFTS[kind]
+    default_unit = "Source patients replaced (%)" if shift.replacement_rate else "Source subgroup share (%)"
+    title, description, xlabel = AMPLIFICATION_PANELS.get(kind, (shift.label, "", default_unit))
+    axis.set_xlabel(xlabel)
+    axis.set_title(title, loc="left", pad=20 if description else 8, fontweight="bold", color="#172332")
+    if description:
+        axis.text(0, 1.02, description, transform=axis.transAxes, va="bottom", fontsize=9, color="#505963")
+
+    percentage = PercentFormatter(1)
+    axis.xaxis.set_major_formatter(percentage)
+    if shift.replacement_rate:
+        axis.xaxis.set_major_formatter(
+            lambda value, position: "0%\nUnshifted source" if value == 0 else percentage(value, position))
+    else:
+        axis.axvline(baseline, color="#687586", linestyle=":", linewidth=1)
+        left, right = axis.get_xlim()
+        near_right = baseline > (left + right) / 2
+        axis.annotate(f"Baseline {baseline:.1%}", (baseline, 1), xycoords=axis.get_xaxis_transform(),
+                      xytext=(-5 if near_right else 5, -6), textcoords="offset points",
+                      ha="right" if near_right else "left", va="top", fontsize=8, color="#505963")
+    axis.set_axisbelow(True)
+    axis.grid(axis="y", color="#dbe3ec", linewidth=.7, alpha=.75)
+    axis.axhline(0, color="#415268", linestyle="--", linewidth=1.15)
+
+
 def dp_amplification(effects, output, budgets, colors, baselines, note=CI_NOTE):
-    figure, axes = panels(baselines)
+    columns = min(2, len(baselines))
+    rows = (len(baselines) + columns - 1) // columns
+    height = 2.9 * rows + 2
+    figure, grid = plt.subplots(rows, columns, figsize=(10.8 if columns == 2 else 7.4, height),
+                                sharey=True, squeeze=False)
+    axes = grid.ravel()[:len(baselines)]
+    for axis in grid.ravel()[len(baselines):]:
+        figure.delaxes(axis)
+
     for axis, (kind, baseline) in zip(axes, baselines.items()):
+        shifted = effects.loc[effects.shift_type.eq(kind)]
         for budget in budgets:
-            data = effects.loc[effects.shift_type.eq(kind) & effects.comparison_epsilon.eq(budget)]
+            data = shifted.loc[shifted.comparison_epsilon.eq(budget)]
             points = [(fraction, group.dp_amplification) for fraction, group in data.groupby("shift_fraction")]
             points.append((baseline, np.zeros(data.repeat.nunique())))
             line(axis, points, f"ε={budget:g}", colors[budget], scale=100)
-            axis.plot(baseline, 0, "s", color=colors[budget], markersize=6)
-        axis.axhline(0, color="#555555", linestyle="--", linewidth=1)
-        fraction_axis(axis, baseline, kind)
-        axis.set(title=SHIFTS[kind].label, ylabel="Additional DP shift penalty\n(AUPRC percentage points)")
-        axis.legend(frameon=False)
-    figure.suptitle("DP amplification of the source-shift penalty")
+        axis.plot(baseline, 0, "s", color="#415268", markeredgecolor="white", markersize=6, zorder=4)
+        amplification_axis(axis, kind, baseline)
+
+    figure.suptitle("Does Differential Privacy Make Distribution Shift More Harmful?",
+                    fontsize=18 if columns == 2 else 15, fontweight="bold", color="#172332", y=1 - .20 / height)
+    figure.text(.5, 1 - .63 / height,
+                "Extra loss in target AUPRC from source shift under DP-SGD versus standard SGD.",
+                ha="center", fontsize=10, color="#505963")
+    figure.supylabel("Extra AUPRC loss under DP-SGD (percentage points)", x=.02, fontsize=11)
+    legend_columns = min(5, len(budgets))
+    legend_rows = (len(budgets) + legend_columns - 1) // legend_columns
+    extra_legend_height = .20 * (legend_rows - 1)
+    figure.legend(*axes[0].get_legend_handles_labels(), title="DP-SGD privacy budget", ncols=legend_columns,
+                  loc="upper center", bbox_to_anchor=(.5, 1 - .83 / height), frameon=False)
+    figure.text(.5, 1 - (1.37 + extra_legend_height) / height, "Dashed line · No additional DP effect",
+                ha="center", fontsize=8, color="#415268")
+
     save(figure, output, "dp_amplification",
-         "Positive = DP amplifies the penalty. Baseline self-comparison is zero by definition.\n" + note)
+         "Positive values indicate greater sensitivity to source shift under DP-SGD. Negative values indicate lower sensitivity.\n"
+         "AUPRC differences are in percentage points. " + note,
+         layout_rect=(.02, .58 / height, .985, 1 - (1.54 + extra_legend_height) / height))
 
 
 def privacy_utility(runs, output, budgets, fractions, note=CI_NOTE):
