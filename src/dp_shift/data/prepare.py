@@ -13,7 +13,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from dp_shift.config import DEFAULT_CONFIG, PROTOCOL, load_config
+from dp_shift.config import DEFAULT_CONFIG, load_config
 
 from .artifacts import (TRAIN_PARTITIONS, input_paths, load_evaluation_data, load_saved_cohort,
                         save_bundle, validate_evaluation_manifest, verify_artifacts, write_artifact_index)
@@ -45,7 +45,6 @@ def provenance(config_path):
     return {
         "project_root": str(project),
         "config_source_sha256": file_hash(config_path),
-        "protocol_sha256": file_hash(project / PROTOCOL.protocol_path),
         "implementation_sha256": implementation_hash(),
         "versions": {"python": platform.python_version(), **{
             name: version(name) for name in ["numpy", "pandas", "scikit-learn", "scipy", "joblib"]}},

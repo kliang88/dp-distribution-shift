@@ -61,7 +61,7 @@ def main(argv=None):
         message = str(error)
         print(f"\n{active_stage.upper()} FAILED: {message}", file=sys.stderr)
         if isinstance(error, ImportError):
-            print("Install the stage dependencies described in README.md.", file=sys.stderr)
+            print("Install dependencies with python -m pip install -r requirements.txt.", file=sys.stderr)
         raise SystemExit(1) from None
     except KeyboardInterrupt:
         print(f"\n{active_stage.upper()} INTERRUPTED. Run the same command to reuse completed comparisons "

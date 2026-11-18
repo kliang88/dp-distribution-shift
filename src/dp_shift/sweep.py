@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import signal
 
-from .config import (PROTOCOL, SelectedHyperparameters, comparison_config, exact_keys,
+from .config import (SelectedHyperparameters, comparison_config, exact_keys,
                      resolve_config, study_plan, validate_comparisons)
 from .data.shifts import SHIFTS, members
 from .data.utils import file_hash, read_json, require
@@ -186,8 +186,7 @@ def run(output, config, progress=print, *, workers=1):
     cells = {(kind, fraction, epsilon): Path(kind) / f"fraction_{fraction:g}" / f"epsilon_{epsilon:g}"
              for kind, fraction, epsilon in grid(plan)}
     require(len(set(cells.values())) == len(cells), "Comparison paths collide after formatting fractions or epsilons")
-    context = {"inputs": input_fingerprints(), "code_hashes": implementation_hashes(), "versions": versions(),
-               "readme_sha256": file_hash(PROTOCOL.protocol_path)}
+    context = {"inputs": input_fingerprints(), "code_hashes": implementation_hashes(), "versions": versions()}
     if saved is not None:
         require(saved["context"] == context, "Sweep inputs, code, or dependencies changed; choose a new --output directory")
     progress("Checking partitions and source feasibility across the complete grid…")

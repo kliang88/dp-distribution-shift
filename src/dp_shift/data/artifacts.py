@@ -11,7 +11,7 @@ from .cohort import build_cohort
 from .preprocessing import transform_features, transformer_metadata
 from .sampling import validate_source_pair
 from .schema import discharge_descriptions, load_and_validate_raw
-from dp_shift.config import PARTITIONS, PROTOCOL, resolve_config
+from dp_shift.config import PARTITIONS, resolve_config
 
 from .splits import read_manifest, rows_for_manifest, validate_splits
 from .utils import file_hash, read_json, require, write_json
@@ -72,12 +72,10 @@ def write_artifact_index(root):
             entry["columns"], entry["n"] = table.columns.tolist(), len(table)
         entries[relative] = entry
     write_json(root / "artifact_manifest.json", entries)
-    provenance = read_json(root / "provenance.json")
     write_json(root / "COMPLETE.json", {
         "status": "complete", "protocol_version": read_json(root / "config.json")["protocol_version"],
         "artifact_manifest_sha256": file_hash(root / "artifact_manifest.json"),
         "config_sha256": file_hash(root / "config.json"),
-        "protocol_sha256": provenance["protocol_sha256"],
         "transformer_sha256": file_hash(root / "preprocessing/transformer.joblib"),
     })
 
@@ -117,8 +115,6 @@ def load_saved_cohort(root):
     paths = input_paths(provenance, saved_config)
     for name, path in paths.items():
         require(file_hash(path) == saved_config["inputs"][name]["sha256"], f"Input fingerprint mismatch: {name}")
-    protocol = Path(provenance["project_root"]) / PROTOCOL.protocol_path
-    require(file_hash(protocol) == provenance["protocol_sha256"], "Protocol changed since preparation")
     raw = load_and_validate_raw(paths["records"], config, saved_config["inputs"]["records"]["sha256"])
     return build_cohort(raw, discharge_descriptions(paths["mapping"]))
 
@@ -130,7 +126,6 @@ def verify_artifacts(root):
     saved_config = read_json(root / "config.json")
     config = resolve_config(saved_config["experiment"])
     provenance = read_json(root / "provenance.json")
-    require(complete["protocol_sha256"] == provenance["protocol_sha256"], "Protocol metadata mismatch")
     require(complete["protocol_version"] == saved_config["protocol_version"], "Protocol version mismatch")
     for name in ["numpy", "pandas", "scikit-learn", "joblib"]:
         require(version(name) == provenance["versions"][name], f"Library version changed: {name}")

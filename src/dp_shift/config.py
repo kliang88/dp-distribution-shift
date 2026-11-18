@@ -4,7 +4,6 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 import hashlib
 import math
-from pathlib import Path
 
 from .data.utils import read_json, require
 from .data.shifts import SHIFTS
@@ -40,7 +39,6 @@ class Protocol:
     practical_ap_threshold: float = 0.005
     calibration_bins: int = 10
     evaluation_version: str = "evaluation_v3"
-    protocol_path: str = str(Path(__file__).resolve().parents[2] / "README.md")
 
 
 PROTOCOL = Protocol()
