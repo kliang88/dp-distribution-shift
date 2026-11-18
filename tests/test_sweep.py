@@ -119,6 +119,37 @@ def test_infeasible_grid_fails_before_tuning(experiment, monkeypatch):
     assert not output.exists()
 
 
+def test_parallel_experiment_matches_serial_sgd_and_reuses_completed_cells(experiment, capsys, monkeypatch):
+    from dp_shift import sweep
+
+    _, output, path = experiment
+    choices = read_json(path)
+    choices["comparisons"]["epsilons"] = [4., 8.]
+    write_json(path, choices)
+    serial = output.with_name("serial")
+    args = ["experiment", "--config", str(path)]
+
+    main([*args, "--output", str(serial)])
+    main([*args, "--output", str(output), "--workers", "2"])
+    assert "Running comparisons with 2 CPU workers" in capsys.readouterr().out
+    expected = pd.read_csv(serial / "data/runs.csv")
+    actual = pd.read_csv(output / "data/runs.csv")
+    assert actual.run_id.tolist() == expected.run_id.tolist()
+    pd.testing.assert_frame_equal(actual.loc[actual.method.eq("sgd")],
+                                  expected.loc[expected.method.eq("sgd")], check_exact=True)
+    assert sweep.verify(output)["evaluated_models"] == len(expected)
+
+    saved = read_json(output / "protocol.json")
+    expected_saved = read_json(serial / "protocol.json")
+    for cell, expected_cell in zip(saved["cells"], expected_saved["cells"]):
+        assert cell["membership_hashes"] == expected_cell["membership_hashes"]
+        assert cell["source_hashes"] == expected_cell["source_hashes"]
+
+    monkeypatch.setattr(sweep, "run_cell", lambda *args, **kwargs: pytest.fail("Completed cells ran again"))
+    main([*args, "--output", str(output), "--workers", "1"])
+    assert read_json(output / "protocol.json") == saved
+
+
 def test_grid_recovers_verifies_and_retains_csv_data(experiment, monkeypatch, capsys):
     from dp_shift import sweep
     from dp_shift.evaluation.sweep import validate, accounted_runs

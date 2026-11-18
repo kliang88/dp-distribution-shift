@@ -18,6 +18,8 @@ def parser():
                             help="Results directory (default: %(default)s)")
     experiment.add_argument("--config", default=DEFAULT_CONFIG,
                             help="Configuration (default: %(default)s)")
+    experiment.add_argument("--workers", type=int, default=1,
+                            help="Number of CPU processes for comparison cells (default: %(default)s)")
     plot = commands.add_parser("plot", help="Create figures from retained CSV data without training")
     plot.add_argument("--input", required=True, help="Results directory or its data/ subdirectory")
     plot.add_argument("--output", help="Figure directory (default: <results>/plots)")
@@ -53,7 +55,8 @@ def main(argv=None):
                                          epsilon=args.epsilon, shift=args.shift, fraction=args.fraction))
             return
         from .sweep import run
-        display(f"{args.command.upper()} COMPLETE", run(output, args.config, progress=progress))
+        display(f"{args.command.upper()} COMPLETE",
+                run(output, args.config, progress=progress, workers=args.workers))
     except (ValueError, OSError, KeyError, RuntimeError, AssertionError, ImportError) as error:
         message = str(error)
         print(f"\n{active_stage.upper()} FAILED: {message}", file=sys.stderr)

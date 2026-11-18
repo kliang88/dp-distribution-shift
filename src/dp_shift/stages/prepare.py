@@ -10,18 +10,18 @@ from dp_shift.data.utils import file_hash, read_json, require
 from .common import completed, finish, protocol, workspace
 
 
-def run(output, config, progress=print):
+def run(output, config, progress=print, *, records=None, mapping=None):
     existing = completed(output, "prepare", config)
     if existing is not None:
         saved = protocol(output)["stages"]["prepare"]["resolved"]
-        require(saved["inputs"] == input_fingerprints(),
+        require(saved["inputs"] == input_fingerprints(records, mapping),
                 "Preparation inputs changed; choose a new --output directory")
         progress("Verified existing prepared data.")
         return existing
     output = Path(output)
     work = workspace(output)
     progress("Preparing and verifying patient splits, source pairs, and features…")
-    summary = build(config, work / "data")
+    summary = build(config, work / "data", records=records, mapping=mapping)
     saved_config = read_json(work / "data/config.json")
     require(load_config(config).requested.to_dict() == saved_config["experiment"], "Preparation configuration changed during execution")
     return finish(output, "prepare", config, summary, [],

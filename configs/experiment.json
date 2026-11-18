@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "seed": 20261107,
-  "repeats": 1,
+  "repeats": 20,
   "data": {
     "source_pool_size": 48000,
     "proxy_train_size": 3600,

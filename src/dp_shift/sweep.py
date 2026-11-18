@@ -1,7 +1,11 @@
 """Run scalar experiments over a grid, then retain only combined research outputs."""
 
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from copy import deepcopy
+from multiprocessing import get_context
+import os
 from pathlib import Path
+import signal
 
 from .config import (PROTOCOL, SelectedHyperparameters, comparison_config, exact_keys,
                      resolve_config, study_plan, validate_comparisons)
@@ -95,11 +99,73 @@ def reference_tuning(work, plan):
             "candidates": frozen["candidate_results"]}
 
 
-def run(output, config, progress=print):
+def run_cell(comparison, directory, base, selected, inputs, progress=None):
+    from .stages import prepare, train, evaluate
+
+    kind, fraction, epsilon = comparison
+    label = f"{kind}, fraction {fraction:g}, epsilon {epsilon:g}"
+
+    def report(message):
+        if progress is None:
+            print(f"[experiment] {label}: {message}", flush=True)
+        else:
+            progress(f"{label}: {message}")
+
+    config = directory / "config.json"
+    cell = directory / "result"
+    try:
+        save_config(config, experiment(base, fraction, epsilon, shift_type=kind))
+        prepare.run(cell, config, progress=report, records=inputs["records"], mapping=inputs["mapping"])
+        train.run(cell, config, progress=report, selected=selected)
+        evaluate.run(cell, config, progress=report, resume=True)
+    except Exception as error:
+        if progress is not None:
+            raise
+        raise RuntimeError(f"{label}: {error}") from error
+
+
+def configure_worker():
+    # The parent handles Ctrl-C so active cells can finish writing their outputs.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                 "VECLIB_MAXIMUM_THREADS", "BLIS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ[name] = "1"
+
+
+def run_parallel(cells, base, selected, inputs, workers, progress):
+    executor = ProcessPoolExecutor(max_workers=workers, mp_context=get_context("spawn"),
+                                   initializer=configure_worker)
+    remaining = iter(cells.items())
+
+    def submit_next():
+        job = next(remaining, None)
+        if job is not None:
+            comparison, directory = job
+            pending.add(executor.submit(run_cell, comparison, directory, base, selected, inputs))
+
+    pending = set()
+    try:
+        for _ in range(workers):
+            submit_next()
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                future.result()
+            for _ in done:
+                submit_next()
+    except BaseException:
+        progress("Waiting for active comparisons to finish before exiting…")
+        raise
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
+def run(output, config, progress=print, *, workers=1):
+    require(type(workers) is int and workers >= 1, "workers must be a positive integer")
+
     from .data.prepare import input_fingerprints
     from .evaluation.sweep import collect, publish
     from .evaluation.provenance import versions
-    from .stages import prepare, train, evaluate
     from .training.model import configure_cpu
 
     output = Path(output)
@@ -117,6 +183,9 @@ def run(output, config, progress=print):
     else:
         require(not output.exists() or not any(output.iterdir()), "Output must be empty or belong to this study; choose a new --output directory")
         saved = None
+    cells = {(kind, fraction, epsilon): Path(kind) / f"fraction_{fraction:g}" / f"epsilon_{epsilon:g}"
+             for kind, fraction, epsilon in grid(plan)}
+    require(len(set(cells.values())) == len(cells), "Comparison paths collide after formatting fractions or epsilons")
     context = {"inputs": input_fingerprints(), "code_hashes": implementation_hashes(), "versions": versions(),
                "readme_sha256": file_hash(PROTOCOL.protocol_path)}
     if saved is not None:
@@ -131,20 +200,21 @@ def run(output, config, progress=print):
     configure_cpu()
     progress("Selecting or verifying shared settings on public reference data…")
     reference = reference_tuning(work, plan)
+    selected = SelectedHyperparameters(**reference["selected"])
+    inputs = {name: info["path"] for name, info in context["inputs"].items()}
+    cells = {comparison: work / path for comparison, path in cells.items()}
+    workers = min(workers, len(cells))
+    if workers == 1:
+        for comparison, directory in cells.items():
+            run_cell(comparison, directory, plan["base"], selected, inputs, progress=progress)
+    else:
+        progress(f"Running comparisons with {workers} CPU workers…")
+        run_parallel(cells, plan["base"], selected, inputs, workers, progress)
+
     runs, records = [], []
-    for kind, fraction, epsilon in grid(plan):
-        directory = work / kind / f"fraction_{fraction:g}" / f"epsilon_{epsilon:g}"
-        cell_config = directory / "config.json"
-        save_config(cell_config, experiment(plan["base"], fraction, epsilon, shift_type=kind))
-        cell = directory / "result"
-
-        def report(message):
-            progress(f"{kind}, fraction {fraction:g}, epsilon {epsilon:g}: {message}")
-
-        prepare.run(cell, cell_config, progress=report)
-        train.run(cell, cell_config, progress=report, selected=SelectedHyperparameters(**reference["selected"]))
-        evaluate.run(cell, cell_config, progress=report, resume=True)
-        scores, record = collect(cell, kind, fraction, epsilon, prefix=f"{kind}_{fraction:g}_e{epsilon:g}_")
+    for (kind, fraction, epsilon), directory in cells.items():
+        scores, record = collect(directory / "result", kind, fraction, epsilon,
+                                 prefix=f"{kind}_{fraction:g}_e{epsilon:g}_")
         runs.append(scores)
         records.append(record)
     progress("Publishing combined scores and curve data as four CSV tables…")
