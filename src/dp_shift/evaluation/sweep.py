@@ -74,12 +74,14 @@ def validate(runs, saved):
         verify_privacy(group, cell["privacy"], cell["selected"], plan["base"]["privacy"]["clipping_norm"], epsilon)
 
 
-def publish(output, saved, reference, datasets, records):
+def publish(output, saved, reference, datasets, records, *, audit_path=None):
     runs = pd.concat(datasets, ignore_index=True)
     saved = {**saved, "reference_tuning": reference, "cells": records, "evaluated_models": len(runs),
              "definitions": {"auprc": "Non-interpolated average precision",
                              "auroc": "Area under the receiver operating characteristic curve",
                              "brier": "Mean squared error of predicted probabilities",
+                             "shift_fraction": "Requested source share or diagnosis replacement rate, by shift type",
+                             "source_fraction": "Observed subgroup share in the source sample",
                              "comparison_epsilon": "Grid budget, with no privacy guarantee for SGD",
                              "privacy": "Per private model",
                              "intervals": "95% paired t intervals across repeats on a fixed test set"}}
@@ -87,5 +89,8 @@ def publish(output, saved, reference, datasets, records):
     validate(runs, saved)
     path = Path(output) / tables.RUNS_FILE
     tables.write(path, runs)
-    saved.update(status="complete", files={tables.RUNS_FILE: file_hash(path)})
+    files = {tables.RUNS_FILE: file_hash(path)}
+    if audit_path is not None:
+        files[audit_path.name] = file_hash(audit_path)
+    saved.update(status="complete", files=files)
     atomic_json(Path(output) / "protocol.json", saved)

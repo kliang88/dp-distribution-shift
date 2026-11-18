@@ -55,16 +55,27 @@ def validate(runs):
     require(runs.test_fraction.between(0, 1).all(), "Invalid test fraction")
     require(runs.groupby("shift_type").test_fraction.nunique().eq(1).all(),
             "Test fraction changed within a shift type")
-    shifted = runs.loc[runs.pretraining.eq("shifted")]
-    require(np.allclose(shifted.source_fraction, shifted.shift_fraction, rtol=0, atol=1e-12),
-            "Shifted source fraction mismatch")
-
     # Uniqueness and the six allowed conditions make this a completeness check.
     repeats = runs.repeat.nunique()
     require(runs.repeat.max() == repeats - 1
             and runs.groupby(GRID + ["repeat"]).size().eq(len(CONDITIONS)).all()
             and cells(runs).size().eq(repeats * len(CONDITIONS)).all(),
             "Missing model conditions or repeats")
+
+    replacement_kinds = {name for name, shift in SHIFTS.items() if shift.replacement_rate}
+    uses_replacements = source.shift_type.isin(replacement_kinds)
+    shifted = source.loc[~uses_replacements & source.pretraining.eq("shifted")]
+    require(np.allclose(shifted.source_fraction, shifted.shift_fraction, rtol=0, atol=1e-12),
+            "Shifted source fraction mismatch")
+    if uses_replacements.any():
+        pairs = source.loc[uses_replacements].pivot(
+            index=[*GRID, "repeat", "method"], columns="pretraining", values=["source_fraction", "source_size"])
+        size = pairs["source_size"]["baseline"]
+        expected = np.rint(size * pairs.index.get_level_values("shift_fraction"))
+        actual = size * (pairs["source_fraction"]["shifted"] - pairs["source_fraction"]["baseline"])
+        require(size.eq(pairs["source_size"]["shifted"]).all() and ((expected > 0) & (expected < size)).all()
+                and np.allclose(actual, expected, rtol=0, atol=1e-8),
+                "Shifted source fraction does not match the requested replacements")
 
 
 def read(path):

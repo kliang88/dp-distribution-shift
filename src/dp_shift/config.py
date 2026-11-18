@@ -60,7 +60,8 @@ FIXED_PROTOCOL = {
     "tuning_ties": "AUPRC within 1e-6, then Brier, epochs, learning rate",
     "intervals": "Student t across repeats, paired for effects, conditional on fixed test set",
     "fixed_partitions_across_repeats": True, "cpu_threads": 1,
-    "source_replacements": "bidirectional; fixed per-repeat permutation prefixes within each direction; no swaps at equal prevalence",
+    "source_replacements": "Fixed shares use bidirectional swaps and seeded permutation prefixes. Diagnosis shifts "
+                           "use readmission-matched swaps from outside S0, rounded to the nearest patient (ties to even).",
     "deterministic_algorithms": True,
 }
 
@@ -176,8 +177,9 @@ class Seeds:
 class ResolvedConfig:
     requested: ExperimentConfig
     seeds: Seeds
-    shift_member_count: int
+    shift_member_count: int | None
     calibration_epsilon: float
+    source_replacement_count: int | None = None
 
     def to_dict(self):
         """Keep the existing public metadata schema at serialization boundaries."""
@@ -189,11 +191,13 @@ class ResolvedConfig:
             **protocol, **choices["tuning"],
             "experiment": choices, "fixed_protocol": deepcopy(FIXED_PROTOCOL),
             "protocol_version": PROTOCOL_VERSION,
-            "shift_definitions": {name: {"label": shift.label, "columns": list(shift.columns)}
+            "shift_definitions": {name: {"label": shift.label, "columns": list(shift.columns),
+                                         "replacement_rate": shift.replacement_rate}
                                   for name, shift in SHIFTS.items()},
             "seed": choices["seed"], "repeats": choices["repeats"], "data": choices["data"],
             "seeds": asdict(self.seeds), **source,
             "shift_member_count": self.shift_member_count,
+            "source_replacement_count": self.source_replacement_count,
             "epsilon_cap": privacy["epsilon"], "clipping_norm": privacy["clipping_norm"],
             "calibration_epsilon": self.calibration_epsilon,
         }
@@ -245,9 +249,15 @@ def resolve_config(experiment) -> ResolvedConfig:
     rate, size = source["shift_fraction"], source["pretrain_size"]
     require(rate < 1, "shift_fraction must be below 1")
     count = size * rate
-    require(math.isclose(count, round(count), rel_tol=0, abs_tol=1e-9),
-            "pretrain_size * shift_fraction must be an integer")
-    require(0 < round(count) < size, "Shifted source must contain both classes")
+    # Round swaps to the nearest integer, using ties-to-even for half patients.
+    rounded = round(count)
+    replacement_rate = SHIFTS[source["shift_type"]].replacement_rate
+    if replacement_rate:
+        require(0 < rounded < size, "Replacement rate must round to between 1 and pretrain_size - 1 swaps")
+    else:
+        require(math.isclose(count, rounded, rel_tol=0, abs_tol=1e-9),
+                "pretrain_size * shift_fraction must be an integer")
+        require(0 < rounded < size, "Shifted source must contain both classes")
     require(size < data["source_pool_size"], "source_pool_size must exceed pretrain_size for replacements")
     for key, value in privacy.items():
         positive_number(value, f"privacy.{key}")
@@ -263,7 +273,9 @@ def resolve_config(experiment) -> ResolvedConfig:
                                         tuple(tuning["target_learning_rates"]), tuple(tuning["target_epoch_candidates"])))
     seeds = Seeds(**{role: int.from_bytes(hashlib.sha256(f"{seed}:{role}".encode()).digest()[:4], "big") % 2**31
                      for role in SEED_ROLES})
-    return ResolvedConfig(requested, seeds, round(count), privacy["epsilon"] * (7.99 / 8))
+    return ResolvedConfig(requested, seeds, shift_member_count=None if replacement_rate else rounded,
+                          calibration_epsilon=privacy["epsilon"] * (7.99 / 8),
+                          source_replacement_count=rounded if replacement_rate else None)
 
 
 def load_config(path) -> ResolvedConfig:

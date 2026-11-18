@@ -39,6 +39,39 @@ def test_indicators_use_raw_values_and_exact_thresholds():
     assert members(frame, "readmission").tolist() == [False, True, False, True]
 
 
+def test_diagnosis_indicators_use_distinct_eligible_categories():
+    frame = pd.DataFrame({
+        "diag_1": ["414.01", "401", None, "V42.0", "300", "invalid", "250.83"],
+        "diag_2": ["427", "486", "?", "E888.9", "301", "250", "250.01"],
+        "diag_3": ["invalid", None, "E888", None, "414", "486", "?"],
+    })
+    assert members(frame, "primary_diagnosis_circulatory").tolist() == [True, True, False, False, False, False, False]
+    assert members(frame, "clinical_complexity_2plus").tolist() == [False, True, False, True, False, True, False]
+
+
+def test_diagnosis_swaps_round_counts_and_use_only_labels_with_available_matches():
+    kind = "primary_diagnosis_circulatory"
+    choices = config(kind, .0625)  # 2.5 patients rounds to 2.
+    pool = patients()
+    baseline = pool.sample(n=40, random_state=choices.seeds.s0)
+    in_baseline = pool.index.isin(baseline.index)
+    pool["diag_1"] = np.where(in_baseline & pool.y.eq(0), None, "414")
+    pool.loc[~in_baseline & pool.y.eq(1), "diag_1"] = "250"
+    pair = create_source_pair(pool, 0, choices)
+    assert len(pair["removed"]) == len(pair["added"]) == 2
+    assert pair["removed"].y.eq(0).all() and pair["added"].y.eq(0).all()
+    assert pair["s0"].y.sum() == pair["s1"].y.sum()
+    assert set(pair["added"].patient_nbr).isdisjoint(pair["s0"].patient_nbr)
+    assert members(pair["s1"], kind).sum() - members(pair["s0"], kind).sum() == 2
+    repeated = create_source_pair(pool, 0, choices)
+    for name in pair:
+        pd.testing.assert_frame_equal(pair[name], repeated[name])
+
+    pool.loc[~in_baseline & pool.y.eq(0), "diag_1"] = "250"
+    with pytest.raises(ValueError, match="at most 0 are possible"):
+        create_source_pair(pool, 0, choices)
+
+
 @pytest.mark.parametrize("kind,column,value", [
     ("age_70_plus", "age", None), ("age_70_plus", "age", "unknown"),
     ("prior_inpatient_2_plus", "number_inpatient", None),
@@ -137,30 +170,68 @@ def test_preflight_validates_all_selected_traits_before_training(experiment):
         preflight(load_plan(sweep))
 
 
+def test_infeasible_diagnosis_shift_is_audited_before_training(experiment, monkeypatch):
+    from dp_shift.data.audit import SHIFT_AUDIT_FILE
+    from dp_shift.sweep import run
+
+    _, output, path = experiment
+    choices = read_json(path)
+    choices["comparisons"]["shifts"] = {"primary_diagnosis_circulatory": [.2]}
+    write_json(path, choices)
+    monkeypatch.setattr("dp_shift.sweep.reference_tuning", lambda *_: pytest.fail("Tuned an infeasible sweep"))
+    with pytest.raises(ValueError, match="infeasible source draws"):
+        run(output, path)
+    audit = pd.read_csv(output / SHIFT_AUDIT_FILE)
+    assert len(audit) == 4
+    assert set(audit.condition) == {"s0", "s1"}
+    assert audit.status.eq("infeasible").all()
+    assert audit.requested_replacements.eq(8).all() and audit.replacements.eq(0).all()
+    assert audit.shifted_subgroup_fraction.isna().all()
+    assert audit.reason.str.contains("at most 0 are possible").all()
+
+
 def test_mixed_sweep_preserves_controls_and_creates_five_faceted_figures(experiment, monkeypatch):
     from dp_shift.cli import main
+    from dp_shift.data.audit import SHIFT_AUDIT_FILE
     from dp_shift.evaluation import tables, plots
     from dp_shift.sweep import run, verify
 
     _, output, path = experiment
     sweep = path.parent / "mixed.json"
     choices = read_json(path)
-    choices["comparisons"]["shifts"] = {"readmission": [.1], "age_70_plus": [.7], "prior_inpatient_2_plus": [.5]}
+    choices["comparisons"]["shifts"] = {
+        "readmission": [.1], "age_70_plus": [.7],
+        "primary_diagnosis_circulatory": [.1], "clinical_complexity_2plus": [.2],
+    }
     write_json(sweep, choices)
+    records = path.parent.parent / "data/records.csv"
+    frame = pd.read_csv(records, dtype={"diag_1": str, "diag_2": str})
+    frame.loc[frame.patient_nbr.mod(4).eq(0), "diag_1"] = "414"
+    frame.loc[frame.patient_nbr.mod(5).eq(0), "diag_2"] = "486"
+    frame.to_csv(records, index=False)
     run(output, sweep, progress=lambda message: None)
     saved = read_json(output / "protocol.json")
-    assert saved["evaluated_models"] == 36
+    assert saved["evaluated_models"] == 48
     assert len({tuple(sorted(cell["membership_hashes"].items())) for cell in saved["cells"]}) == 1
     assert len({tuple(sorted({key: value for key, value in cell["source_hashes"].items() if key.endswith("_s0")}.items()))
                 for cell in saved["cells"]}) == 1
     assert len({tuple(sorted(cell["selected"].items())) for cell in saved["cells"]}) == 1
     runs = tables.read(output / tables.RUNS_FILE)
-    assert set(runs.shift_type) == set(SHIFTS)
-    assert len(tables.cells(runs)) == 3
+    assert set(runs.shift_type) == set(choices["comparisons"]["shifts"])
+    assert len(tables.cells(runs)) == 4
     assert not (output / ".work").exists()
-    for _, cell in tables.cells(runs):
+    for (kind, rate, _), cell in tables.cells(runs):
         shifted = cell.loc[cell.pretraining.eq("shifted")]
-        np.testing.assert_allclose(shifted.source_fraction, shifted.shift_fraction)
+        if SHIFTS[kind].replacement_rate:
+            baseline = cell.loc[cell.pretraining.eq("baseline")]
+            np.testing.assert_allclose(shifted.source_fraction.to_numpy() - baseline.source_fraction.to_numpy(), rate)
+        else:
+            np.testing.assert_allclose(shifted.source_fraction, shifted.shift_fraction)
+    audit = pd.read_csv(output / SHIFT_AUDIT_FILE)
+    assert audit.status.eq("complete").all() and len(audit) == 8
+    assert audit.baseline_readmission_count.eq(audit.shifted_readmission_count).all()
+    assert (audit.shifted_subgroup_count - audit.baseline_subgroup_count).eq(audit.replacements).all()
+    assert file_hash(output / SHIFT_AUDIT_FILE) == saved["files"][SHIFT_AUDIT_FILE]
     age = runs.loc[runs.shift_type.eq("age_70_plus")]
     assert age.test_fraction.eq(saved["cells"][1]["test_characteristics"]["age_70_plus"]["fraction"]).all()
     assert not np.isclose(age.test_fraction.iloc[0], saved["cells"][1]["test_reference"]["test_prevalence"])
@@ -170,14 +241,18 @@ def test_mixed_sweep_preserves_controls_and_creates_five_faceted_figures(experim
 
     def inspect(figure, directory, name, caption):
         captured[name] = len(figure.axes)
+        if name in {"pretraining_benefit", "dp_amplification"}:
+            assert [axis.get_xlabel() for axis in figure.axes][2:] == ["Source replacement rate"] * 2
+            for axis in figure.axes[2:]:
+                assert axis.containers[0].lines[0].get_xdata()[0] == 0
         original_save(figure, directory, name, caption)
 
     with monkeypatch.context() as patch:
         patch.setattr(plots, "save", inspect)
         main(["plot", "--input", str(output)])
     assert set(captured) == set(plots.FIGURES)
-    assert set(captured.values()) == {3}
+    assert set(captured.values()) == {4}
     main(["plot", "--input", str(output), "--output", str(output / "age_plots"), "--shift", "age_70_plus", "--fraction", ".7"])
     assert len(list((output / "age_plots").glob("*.png"))) == 5
     assert csv_hash == file_hash(output / tables.RUNS_FILE)
-    assert verify(output)["evaluated_models"] == 36
+    assert verify(output)["evaluated_models"] == 48

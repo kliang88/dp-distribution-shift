@@ -48,8 +48,14 @@ def diagnosis_category(value):
     return "Invalid"
 
 
+def diagnosis_categories(values):
+    """Apply the shared ICD-9 mapping once per distinct code in a column."""
+    mapping = {code: diagnosis_category(code) for code in values.dropna().unique()}
+    return values.astype(object).map(mapping).fillna("Missing")
+
+
 def normalize_fixed_categories(frame):
-    values = frame[list(DIAGNOSIS_COLUMNS)].map(diagnosis_category)
+    values = frame[list(DIAGNOSIS_COLUMNS)].apply(diagnosis_categories)
     insulin = frame["insulin"]
     values["insulin"] = insulin.where(insulin.isin(INSULIN_CATEGORIES), "Missing")
     return values

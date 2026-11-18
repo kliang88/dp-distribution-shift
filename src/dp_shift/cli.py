@@ -26,7 +26,7 @@ def parser():
     plot.add_argument("--epsilon", type=float, help="Budget for overall performance (default: smallest available)")
     plot.add_argument("--shift", choices=list(SHIFTS), help="Plot one shift type (default: all available)")
     plot.add_argument("--fraction", "--prevalence", dest="fraction", type=float,
-                      help="Source share for performance and privacy–utility; requires one shift type")
+                      help="Source share or replacement rate for performance and privacy–utility (one shift type)")
     return cli
 
 

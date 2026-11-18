@@ -55,11 +55,18 @@ def line(axis, points, label, color, scale=1):
 
 
 def fraction_axis(axis, baseline, kind):
-    axis.set_xlabel(f"Source share: {SHIFTS[kind].label}")
+    shift = SHIFTS[kind]
+    axis.set_xlabel("Source replacement rate" if shift.replacement_rate else f"Source share: {shift.label}")
     axis.xaxis.set_major_formatter(PercentFormatter(1))
     axis.axvline(baseline, color="#777777", linestyle=":", linewidth=1,
                  label=f"Baseline source: {baseline:.1%}")
     axis.grid(alpha=.15)
+
+
+def condition_title(kind, fraction):
+    shift = SHIFTS[kind]
+    level = f"{fraction:.1%} replaced" if shift.replacement_rate else f"source share {fraction:.1%}"
+    return f"{shift.label} · {level}"
 
 
 def overall_performance(runs, output, epsilon, fractions, note=CI_NOTE):
@@ -72,7 +79,7 @@ def overall_performance(runs, output, epsilon, fractions, note=CI_NOTE):
                                        for init in INITIALIZATIONS])
             axis.bar(x + offset, means, width=.36, yerr=errors, capsize=4, color=color, label=label, alpha=.9)
         axis.set(xticks=x, xticklabels=LABELS, ylabel="Target-test AUPRC",
-                 title=f"{SHIFTS[kind].label} · source share {fraction:.1%}")
+                 title=condition_title(kind, fraction))
         axis.legend(frameon=False)
         axis.grid(axis="y", alpha=.15)
     figure.suptitle("Overall model performance")
@@ -127,7 +134,7 @@ def privacy_utility(runs, output, budgets, fractions, note=CI_NOTE):
             line(axis, [(budget, values.auprc) for budget, values in group.groupby("comparison_epsilon")],
                  label.replace("\n", " "), color)
         axis.set(xticks=budgets, xlabel="Privacy budget ε (smaller = stronger privacy)", ylabel="Target-test AUPRC",
-                 title=f"{SHIFTS[kind].label} · source share {fraction:.1%}")
+                 title=condition_title(kind, fraction))
         axis.grid(alpha=.15)
         axis.legend(frameon=False, fontsize=8)
     figure.suptitle("Privacy–utility tradeoff")
@@ -148,7 +155,8 @@ def source_target_prevalence(runs, output, target_size, fractions, note=""):
         labels = [f"Target test\nn={target_size:,}", f"Baseline\n{size_label(reference.source_size)}"]
         values = [[target], reference.source_fraction.to_numpy()]
         for value, group in data.loc[data.pretraining.eq("shifted")].groupby("shift_fraction"):
-            labels.append(f"{value:.1%}\n{size_label(group.source_size)}")
+            level = f"{value:.1%} replaced" if SHIFTS[kind].replacement_rate else f"{value:.1%}"
+            labels.append(f"{level}\n{size_label(group.source_size)}")
             values.append(group.source_fraction.to_numpy())
         positions = np.arange(len(labels))
         axis.bar(positions, [np.mean(value) for value in values], color=[COLORS[0], COLORS[1], *[COLORS[2]] * (len(labels) - 2)], alpha=.8)
@@ -170,7 +178,8 @@ def plot(runs, effects, target_size, output, epsilon, fractions):
     note = "Single repeat; uncertainty not estimated." if single else CI_NOTE
     budgets = sorted(runs.comparison_epsilon.unique())
     colors = dict(zip(budgets, plt.get_cmap("viridis")(np.linspace(.15, .8, len(budgets)))))
-    baselines = {kind: runs.loc[runs.shift_type.eq(kind) & runs.method.eq("sgd") & runs.pretraining.eq("baseline")
+    baselines = {kind: 0.0 if SHIFTS[kind].replacement_rate else
+                 runs.loc[runs.shift_type.eq(kind) & runs.method.eq("sgd") & runs.pretraining.eq("baseline")
                                & runs.comparison_epsilon.eq(budgets[0]) & runs.shift_fraction.eq(fraction), "source_fraction"].mean()
                  for kind, fraction in fractions.items()}
     with plt.rc_context({"font.family": "DejaVu Sans", "font.size": 9,

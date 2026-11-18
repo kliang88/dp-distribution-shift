@@ -32,11 +32,12 @@ def grid(plan):
                 yield kind, fraction, epsilon
 
 
-def preflight(plan):
+def preflight(plan, *, audit_path=None):
     """Check every source draw and partition before any tuning or target training."""
+    from .data.audit import replacement_audit_rows, write_replacement_audit
     from .data.cohort import build_cohort
     from .data import prepare
-    from .data.sampling import create_source_pair
+    from .data.sampling import InfeasibleReplacement, create_source_pair
     from .data.schema import load_and_validate_raw
     from .data.splits import create_split_manifests
 
@@ -47,11 +48,25 @@ def preflight(plan):
         members(raw, kind)
     cohort, _, _ = build_cohort(raw)
     pool = create_split_manifests(cohort, config)["source_pool"]
+    audit_rows, infeasible = [], []
     for kind, fractions in plan["sweep"]["shifts"].items():
         for fraction in fractions:
             config = resolve_config(experiment(plan["base"], fraction, plan["sweep"]["reference_epsilon"], shift_type=kind))
             for repeat in range(config.requested.repeats):
-                create_source_pair(pool, repeat, config)
+                try:
+                    pair = create_source_pair(pool, repeat, config)
+                except InfeasibleReplacement as error:
+                    if audit_path is None:
+                        raise
+                    infeasible.append(f"{kind}, rate {fraction:.1%}, repeat {repeat}: {error}")
+                    audit_rows.extend(replacement_audit_rows(config, repeat, error.baseline, reason=str(error)))
+                else:
+                    if audit_path is not None and config.source_replacement_count is not None:
+                        audit_rows.extend(replacement_audit_rows(config, repeat, pair["s0"], pair["s1"], len(pair["removed"])))
+    if audit_path is not None and audit_rows:
+        write_replacement_audit(audit_path, audit_rows)
+    if infeasible:
+        raise ValueError(f"{len(infeasible)} infeasible source draws. {infeasible[0]}. See {audit_path}")
 
 
 def implementation_hashes():
@@ -171,11 +186,17 @@ def run(output, config, progress=print, *, workers=1):
     context = {"inputs": input_fingerprints(), "code_hashes": implementation_hashes(), "versions": versions()}
     if saved is not None:
         require(saved["context"] == context, "Sweep inputs, code, or dependencies changed; choose a new --output directory")
-    progress("Checking partitions and source feasibility across the complete grid…")
-    preflight(plan)
-    if saved is None:
+    new_run = saved is None
+    if new_run:
         saved = {"format": FORMAT, "status": "running", "configuration": configuration,
                  "plan": plan, "context": context}
+    audit_path = replacement_audit_path(output, plan)
+    progress("Checking partitions and source feasibility across the complete grid…")
+    # Claim the output directory first if preflight can write a retained audit.
+    if new_run and audit_path is not None:
+        atomic_json(manifest, saved)
+    preflight(plan, audit_path=audit_path)
+    if new_run and audit_path is None:
         atomic_json(manifest, saved)
     work = owned_workspace(output, FORMAT)
     configure_cpu()
@@ -198,10 +219,17 @@ def run(output, config, progress=print, *, workers=1):
         runs.append(scores)
         records.append(record)
     progress("Publishing combined model scores to runs.csv…")
-    publish(output, saved, reference, runs, records)
+    publish(output, saved, reference, runs, records, audit_path=audit_path)
     result = verify(output)
     remove_workspace(output, FORMAT)
     return result
+
+
+def replacement_audit_path(output, plan):
+    from .data.audit import SHIFT_AUDIT_FILE
+
+    if any(SHIFTS[kind].replacement_rate for kind in plan["sweep"]["shifts"]):
+        return output / SHIFT_AUDIT_FILE
 
 
 def verify(output):
@@ -212,8 +240,11 @@ def verify(output):
     output = Path(output)
     saved = read_json(output / "protocol.json")
     require(saved.get("format") == FORMAT and saved.get("status") == "complete", "Sweep is incomplete")
-    require(set(saved["files"]) == {RUNS_FILE}, "Experiment output manifest is incomplete")
-    require(file_hash(output / RUNS_FILE) == saved["files"][RUNS_FILE], "Published sweep artifact changed: runs.csv")
+    audit_path = replacement_audit_path(output, saved["plan"])
+    files = {RUNS_FILE} if audit_path is None else {RUNS_FILE, audit_path.name}
+    require(set(saved["files"]) == files, "Experiment output manifest is incomplete")
+    for name in files:
+        require(file_hash(output / name) == saved["files"][name], f"Published sweep artifact changed: {name}")
     validate(read(output / RUNS_FILE), saved)
     return {"combinations": len(saved["cells"]), "evaluated_models": saved["evaluated_models"],
             "repeats": saved["plan"]["base"]["repeats"], "output": str(output)}
