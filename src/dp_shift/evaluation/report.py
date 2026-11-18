@@ -8,9 +8,18 @@ from . import tables
 from .summarize import paired_effects
 
 
-def selected(value, available, name):
+OVERALL_FRACTIONS = {
+    "readmission": .01,
+    "age_70_plus": .80,
+    "primary_diagnosis_circulatory": .05,
+    "clinical_complexity_2plus": .05,
+}
+
+
+def selected(value, available, name, *, preferred=None):
     choices = sorted(available)
-    value = choices[0] if value is None else value
+    if value is None:
+        return preferred if preferred in choices else choices[0]
     require(value in choices, f"{name} must be one of {choices}")
     return value
 
@@ -37,14 +46,23 @@ def run(input, output=None, progress=print, *, epsilon=None, shift=None, fractio
         runs = runs.loc[runs.shift_type.eq(shift)]
     kinds = [kind for kind in SHIFTS if kind in set(runs.shift_type)]
     require(fraction is None or len(kinds) == 1, "--fraction requires --shift when plotting multiple shift types")
-    epsilon = selected(epsilon, runs.comparison_epsilon.unique(), "epsilon")
-    fractions = {kind: selected(fraction, runs.loc[runs.shift_type.eq(kind), "shift_fraction"].unique(), "fraction") for kind in kinds}
     budgets = set(runs.comparison_epsilon)
+    epsilon = selected(epsilon, budgets, "epsilon", preferred=1)
+    fractions, overall_fractions = {}, {}
+    for kind in kinds:
+        levels = runs.loc[runs.shift_type.eq(kind), "shift_fraction"].unique()
+        fractions[kind] = selected(fraction, levels, "fraction")
+        overall_fractions[kind] = selected(fraction, levels, "fraction", preferred=OVERALL_FRACTIONS.get(kind))
     require(all(set(group.comparison_epsilon) == budgets
                 for _, group in runs.groupby(["shift_type", "shift_fraction"])),
             "Shift fractions must have the same privacy budgets")
     effects = paired_effects(runs)
     selection = ", ".join(f"{kind}={value:g}" for kind, value in fractions.items())
-    progress(f"Creating five figures; {selection}; epsilon {epsilon:g}…")
-    count = plot(runs, effects, int(runs.test_size.iloc[0]), output, epsilon, fractions)
-    return {"figures": count, "epsilon": epsilon, "shifts": selection, "output": str(output)}
+    overall_selection = ", ".join(f"{kind}={value:g}" for kind, value in overall_fractions.items())
+    progress(f"Creating five figures with overall performance at {overall_selection} (ε={epsilon:g})…")
+    count = plot(runs, effects, int(runs.test_size.iloc[0]), output, epsilon, fractions,
+                 overall_fractions=overall_fractions)
+    summary = {"figures": count, "epsilon": epsilon, "shifts": selection, "output": str(output)}
+    if overall_fractions != fractions:
+        summary["overall_shifts"] = overall_selection
+    return summary

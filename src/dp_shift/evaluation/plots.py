@@ -21,7 +21,13 @@ INITIALIZATIONS = ("none", "baseline", "shifted")
 LABELS = ("Scratch", "Baseline-source\npretraining", "Shifted-source\npretraining")
 COLORS = ("#777777", "#28658c", "#bc6630")
 CI_NOTE = "95% t intervals across repeats on the fixed target test set."
-AMPLIFICATION_PANELS = {
+OVERALL_PANELS = {
+    "readmission": ("Readmission Prevalence", "{level} source readmission rate"),
+    "age_70_plus": ("Age Distribution", "{level} of source patients aged ≥70"),
+    "primary_diagnosis_circulatory": ("Primary Diagnosis", "{level} source replacement · Circulatory primary diagnosis"),
+    "clinical_complexity_2plus": ("Clinical Complexity", "{level} source replacement · ≥2 diagnosis categories"),
+}
+SOURCE_SHIFT_PANELS = {
     "readmission": ("Readmission Prevalence Shift", "Share readmitted within 30 days", "Source readmission rate (%)"),
     "age_70_plus": ("Patient Age Distribution Shift", "Share of patients aged ≥70", "Source patients aged ≥70 (%)"),
     "primary_diagnosis_circulatory": ("Primary Diagnosis Shift", "Oversample circulatory primary diagnoses",
@@ -46,6 +52,17 @@ def panels(kinds, *, sharey=True):
     return figure, axes[0]
 
 
+def panel_grid(count):
+    columns = min(2, count)
+    rows = (count + columns - 1) // columns
+    figure, grid = plt.subplots(rows, columns, figsize=(10.8 if columns == 2 else 7.4, 2.9 * rows + 2),
+                                sharey=True, squeeze=False)
+    axes = grid.ravel()
+    for axis in axes[count:]:
+        figure.delaxes(axis)
+    return figure, axes[:count]
+
+
 def estimates(groups, scale=1):
     rows = [interval(np.asarray(values) * scale) for values in groups]
     means = np.array([row["mean"] for row in rows])
@@ -54,21 +71,12 @@ def estimates(groups, scale=1):
     return means, None if all(row["n"] == 1 for row in rows) else errors
 
 
-def line(axis, points, label, color, scale=1):
+def line(axis, points, label, color, scale=1, *, fmt="o-", linewidth=1.5, markersize=4):
     points = sorted(points, key=lambda point: point[0])
     x = np.array([value for value, _ in points], dtype=float)
     means, errors = estimates([values for _, values in points], scale)
-    axis.errorbar(x, means, yerr=errors, fmt="o-", color=color,
-                  label=label, capsize=3, linewidth=1.5, markersize=4)
-
-
-def fraction_axis(axis, baseline, kind):
-    shift = SHIFTS[kind]
-    axis.set_xlabel("Source replacement rate" if shift.replacement_rate else f"Source share: {shift.label}")
-    axis.xaxis.set_major_formatter(PercentFormatter(1))
-    axis.axvline(baseline, color="#777777", linestyle=":", linewidth=1,
-                 label=f"Baseline source: {baseline:.1%}")
-    axis.grid(alpha=.15)
+    axis.errorbar(x, means, yerr=errors, fmt=fmt, color=color,
+                  label=label, capsize=3, linewidth=linewidth, markersize=markersize)
 
 
 def condition_title(kind, fraction):
@@ -77,48 +85,105 @@ def condition_title(kind, fraction):
     return f"{shift.label} · {level}"
 
 
+def overall_panel_title(axis, kind, data):
+    shift = SHIFTS[kind]
+    default_subtitle = "{level} source replacement" if shift.replacement_rate else "{level} source subgroup share"
+    title, subtitle = OVERALL_PANELS.get(kind, (shift.label, default_subtitle))
+    shares = data.pivot(index=["repeat", "method"], columns="pretraining", values="source_fraction")
+    achieved = shares["shifted"]
+    if shift.replacement_rate:
+        # Every replacement adds one subgroup member while keeping the source size fixed.
+        achieved = achieved - shares["baseline"]
+    axis.set_title(title, loc="left", pad=20, fontweight="bold", color="#172332")
+    axis.text(0, 1.02, subtitle.format(level=f"{100 * achieved.mean():g}%"), transform=axis.transAxes,
+              va="bottom", fontsize=9, color="#505963")
+
+
 def overall_performance(runs, output, epsilon, fractions, note=CI_NOTE):
-    figure, axes = panels(fractions)
-    x = np.arange(3)
-    for axis, (kind, fraction) in zip(axes, fractions.items()):
-        selected = runs.loc[runs.shift_type.eq(kind) & runs.comparison_epsilon.eq(epsilon) & runs.shift_fraction.eq(fraction)]
-        for offset, method, color, label in ((-.18, "sgd", COLORS[1], "SGD"), (.18, "dp_sgd", COLORS[2], f"DP-SGD, ε={epsilon:g}")):
-            means, errors = estimates([selected.loc[selected.method.eq(method) & selected.pretraining.eq(init), "auprc"]
-                                       for init in INITIALIZATIONS])
-            axis.bar(x + offset, means, width=.36, yerr=errors, capsize=4, color=color, label=label, alpha=.9)
-        axis.set(xticks=x, xticklabels=LABELS, ylabel="Target-test AUPRC",
-                 title=condition_title(kind, fraction))
-        axis.legend(frameon=False)
-        axis.grid(axis="y", alpha=.15)
-    figure.suptitle("Overall model performance")
-    save(figure, output, "overall_performance", note)
+    figure, axes = panel_grid(len(fractions))
+    height = figure.get_figheight()
+    x = np.arange(len(INITIALIZATIONS))
+    selected = runs.loc[runs.comparison_epsilon.eq(epsilon) & runs.shift_fraction.eq(runs.shift_type.map(fractions))]
+    methods = (("sgd", "SGD", COLORS[1], -.18),
+               ("dp_sgd", f"DP-SGD (ε = {epsilon:g})", COLORS[2], .18))
+    for axis, kind in zip(axes, fractions):
+        data = selected.loc[selected.shift_type.eq(kind)]
+        for method, label, color, offset in methods:
+            scores = data.loc[data.method.eq(method)]
+            means, errors = estimates([scores.loc[scores.pretraining.eq(init), "auprc"] for init in INITIALIZATIONS])
+            axis.bar(x + offset, means, width=.34, yerr=errors, color=color, label=label, capsize=3)
+        axis.set(xticks=x, xticklabels=("Scratch", "Unshifted", "Shifted"), xlim=(-.5, 2.5))
+        axis.set_axisbelow(True)
+        axis.grid(axis="y", color="#dbe3ec", linewidth=.7, alpha=.75)
+        overall_panel_title(axis, kind, data)
+    highest = max(axis.dataLim.ymax for axis in axes)
+    axes[0].set_ylim(0, max(axes[0].get_ylim()[1], 1.08 * highest))
+    figure.suptitle("Overall Target-Test Performance Across Training Conditions",
+                    fontsize=18 if len(axes) > 1 else 15, fontweight="bold", color="#172332", y=1 - .20 / height)
+    figure.supylabel("Target-test AUPRC", x=.02, fontsize=11)
+    figure.legend(*axes[0].get_legend_handles_labels(), ncols=2, loc="upper center",
+                  bbox_to_anchor=(.5, 1 - .57 / height), frameon=False)
+
+    caption = ["Unshifted and Shifted use source pretraining before target training."]
+    references = selected.loc[selected.method.eq("dp_sgd") & selected.pretraining.ne("shifted")]
+    if references.groupby(["repeat", "pretraining"]).auprc.nunique().gt(1).any():
+        caption.append("DP-SGD scratch and unshifted scores vary across panels because the models are trained separately.")
+    repeats = selected.repeat.nunique()
+    caption.append(f"{repeats} repeats. {note}" if repeats > 1 else note)
+    if any(axis.dataLim.ymin < 0 for axis in axes):
+        caption[-1] += " Intervals extending below zero are clipped at zero."
+    save(figure, output, "overall_performance", "\n".join(caption),
+         layout_rect=(.025, .55 / height, .985, 1 - .76 / height))
 
 
 def pretraining_benefit(effects, output, budgets, colors, baselines, fractions, note=CI_NOTE):
-    figure, axes = panels(fractions)
+    figure, axes = panel_grid(len(fractions))
+    height = figure.get_figheight()
+    series = [(budgets[0], "gain_sgd", "SGD", COLORS[1])]
+    series.extend((budget, "gain_dp", f"DP-SGD ε={budget:g}", colors[budget]) for budget in budgets)
     for axis, (kind, fraction) in zip(axes, fractions.items()):
-        series = [(budgets[0], "gain_sgd_shifted", "gain_sgd_baseline", "SGD", COLORS[1])]
-        series.extend((budget, "gain_dp_shifted", "gain_dp_baseline", f"DP-SGD, ε={budget:g}", colors[budget]) for budget in budgets)
-        for budget, field, baseline_field, label, color in series:
-            data = effects.loc[effects.shift_type.eq(kind) & effects.comparison_epsilon.eq(budget)]
-            points = [(value, group[field]) for value, group in data.groupby("shift_fraction")]
-            reference = data.loc[data.shift_fraction.eq(fraction), baseline_field]
-            points.append((baselines[kind], reference))
-            line(axis, points, label, color, scale=100)
-            axis.plot(baselines[kind], reference.mean() * 100, "s", color=color, markersize=6)
-        axis.axhline(0, color="#555555", linestyle="--", linewidth=1)
-        fraction_axis(axis, baselines[kind], kind)
-        axis.set(title=SHIFTS[kind].label, ylabel="AUPRC gain (percentage points)")
-        axis.legend(frameon=False)
-    figure.suptitle("Pretraining benefit versus source composition")
-    save(figure, output, "pretraining_benefit",
-         "Pretrained − scratch; positive means pretraining helps. Squares: baseline-source benefit.\n" + note)
+        baseline = baselines[kind]
+        panel = effects.loc[effects.shift_type.eq(kind)]
+        for budget, metric, label, color in series:
+            data = panel.loc[panel.comparison_epsilon.eq(budget)]
+            points = [(value, group[f"{metric}_shifted"]) for value, group in data.groupby("shift_fraction")]
+            reference = data.loc[data.shift_fraction.eq(fraction), f"{metric}_baseline"]
+            line(axis, points, label, color, scale=100, linewidth=1, markersize=5)
+            line(axis, [(baseline, reference)], None, color, scale=100, fmt="s", linewidth=1, markersize=6)
+        source_shift_axis(axis, kind, baseline, baseline_label="Unshifted source")
+
+    figure.suptitle("How Does Source Distribution Shift Affect the Benefit of Pretraining?",
+                    fontsize=17 if len(axes) > 1 else 13, fontweight="bold", color="#172332", y=1 - .20 / height)
+    figure.text(.5, 1 - .62 / height, "Target-test AUPRC with source pretraining minus AUPRC from scratch.",
+                ha="center", fontsize=10, color="#505963")
+    figure.supylabel("Pretraining gain (AUPRC percentage points)", x=.02, fontsize=11)
+    legend_columns = min(4 if len(axes) == 1 else 5, len(series))
+    legend_rows = (len(series) + legend_columns - 1) // legend_columns
+    extra_legend_height = .24 * (legend_rows - 1)
+    figure.legend(*axes[0].get_legend_handles_labels(), ncols=legend_columns,
+                  loc="upper center", bbox_to_anchor=(.5, 1 - .77 / height), frameon=False)
+    figure.text(.5, 1 - (1.19 + extra_legend_height) / height, "Dashed line · No benefit from pretraining",
+                ha="center", fontsize=8, color="#415268")
+
+    selected = "the selected comparison in each panel (lowest shift level by default)"
+    if len(fractions) == 1:
+        selected = f"the {100 * next(iter(fractions.values())):g}% comparison"
+    caption = ["Positive gains indicate better target-test AUPRC with pretraining. Negative gains indicate worse performance.",
+               f"Squares show matched unshifted gains from {selected}."]
+    private_references = effects.groupby(["repeat", "comparison_epsilon"]).gain_dp_baseline
+    if private_references.nunique().gt(1).any():
+        caption.append("DP-SGD reference gains can vary because the models were trained separately for each comparison.")
+    repeats = effects.repeat.nunique()
+    caption.append(f"{repeats} repeats. {note}" if repeats > 1 else note)
+    bottom = .55 + .12 * (len(caption) - 3)
+    save(figure, output, "pretraining_benefit", "\n".join(caption),
+         layout_rect=(.02, bottom / height, .985, 1 - (1.08 + extra_legend_height) / height))
 
 
-def amplification_axis(axis, kind, baseline):
+def source_shift_axis(axis, kind, baseline, *, baseline_label="Baseline"):
     shift = SHIFTS[kind]
     default_unit = "Source patients replaced (%)" if shift.replacement_rate else "Source subgroup share (%)"
-    title, description, xlabel = AMPLIFICATION_PANELS.get(kind, (shift.label, "", default_unit))
+    title, description, xlabel = SOURCE_SHIFT_PANELS.get(kind, (shift.label, "", default_unit))
     axis.set_xlabel(xlabel)
     axis.set_title(title, loc="left", pad=20 if description else 8, fontweight="bold", color="#172332")
     if description:
@@ -133,7 +198,7 @@ def amplification_axis(axis, kind, baseline):
         axis.axvline(baseline, color="#687586", linestyle=":", linewidth=1)
         left, right = axis.get_xlim()
         near_right = baseline > (left + right) / 2
-        axis.annotate(f"Baseline {baseline:.1%}", (baseline, 1), xycoords=axis.get_xaxis_transform(),
+        axis.annotate(f"{baseline_label} {baseline:.1%}", (baseline, 1), xycoords=axis.get_xaxis_transform(),
                       xytext=(-5 if near_right else 5, -6), textcoords="offset points",
                       ha="right" if near_right else "left", va="top", fontsize=8, color="#505963")
     axis.set_axisbelow(True)
@@ -142,14 +207,8 @@ def amplification_axis(axis, kind, baseline):
 
 
 def dp_amplification(effects, output, budgets, colors, baselines, note=CI_NOTE):
-    columns = min(2, len(baselines))
-    rows = (len(baselines) + columns - 1) // columns
-    height = 2.9 * rows + 2
-    figure, grid = plt.subplots(rows, columns, figsize=(10.8 if columns == 2 else 7.4, height),
-                                sharey=True, squeeze=False)
-    axes = grid.ravel()[:len(baselines)]
-    for axis in grid.ravel()[len(baselines):]:
-        figure.delaxes(axis)
+    figure, axes = panel_grid(len(baselines))
+    height = figure.get_figheight()
 
     for axis, (kind, baseline) in zip(axes, baselines.items()):
         shifted = effects.loc[effects.shift_type.eq(kind)]
@@ -159,10 +218,10 @@ def dp_amplification(effects, output, budgets, colors, baselines, note=CI_NOTE):
             points.append((baseline, np.zeros(data.repeat.nunique())))
             line(axis, points, f"ε={budget:g}", colors[budget], scale=100)
         axis.plot(baseline, 0, "s", color="#415268", markeredgecolor="white", markersize=6, zorder=4)
-        amplification_axis(axis, kind, baseline)
+        source_shift_axis(axis, kind, baseline)
 
     figure.suptitle("Does Differential Privacy Make Distribution Shift More Harmful?",
-                    fontsize=18 if columns == 2 else 15, fontweight="bold", color="#172332", y=1 - .20 / height)
+                    fontsize=18 if len(axes) > 1 else 15, fontweight="bold", color="#172332", y=1 - .20 / height)
     figure.text(.5, 1 - .63 / height,
                 "Extra loss in target AUPRC from source shift under DP-SGD versus standard SGD.",
                 ha="center", fontsize=10, color="#505963")
@@ -229,7 +288,7 @@ def source_target_prevalence(runs, output, target_size, fractions, note=""):
          "Bars: observed percentages averaged across repeats. Dots: source repeats.\nThe target test population is fixed; source sample sizes are shown below each bar." + ("\n" + note if note else ""))
 
 
-def plot(runs, effects, target_size, output, epsilon, fractions):
+def plot(runs, effects, target_size, output, epsilon, fractions, *, overall_fractions=None):
     single = runs["repeat"].nunique() == 1
     note = "Single repeat; uncertainty not estimated." if single else CI_NOTE
     budgets = sorted(runs.comparison_epsilon.unique())
@@ -240,7 +299,8 @@ def plot(runs, effects, target_size, output, epsilon, fractions):
                  for kind, fraction in fractions.items()}
     with plt.rc_context({"font.family": "DejaVu Sans", "font.size": 9,
                          "axes.spines.top": False, "axes.spines.right": False}):
-        overall_performance(runs, output, epsilon, fractions, note=note)
+        overall_performance(runs, output, epsilon, fractions if overall_fractions is None else overall_fractions,
+                            note=note)
         pretraining_benefit(effects, output, budgets, colors, baselines, fractions, note=note)
         dp_amplification(effects, output, budgets, colors, baselines, note=note)
         privacy_utility(runs, output, budgets, fractions, note=note)

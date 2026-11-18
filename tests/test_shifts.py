@@ -242,10 +242,16 @@ def test_mixed_sweep_preserves_controls_and_creates_five_faceted_figures(experim
     def inspect(figure, directory, name, caption, **kwargs):
         captured[name] = len(figure.axes)
         if name in {"pretraining_benefit", "dp_amplification"}:
-            label = "Source patients replaced (%)" if name == "dp_amplification" else "Source replacement rate"
-            assert [axis.get_xlabel() for axis in figure.axes][2:] == [label] * 2
+            assert [axis.get_xlabel() for axis in figure.axes][2:] == ["Source patients replaced (%)"] * 2
+            assert figure.axes[0].get_gridspec().get_geometry() == (2, 2)
+            assert len({axis.get_ylim() for axis in figure.axes}) == 1
+            assert len(figure.legends) == 1
             for axis in figure.axes[2:]:
-                assert axis.containers[0].lines[0].get_xdata()[0] == 0
+                if name == "pretraining_benefit":
+                    assert axis.containers[0].lines[0].get_xdata()[0] > 0
+                    assert axis.containers[1].lines[0].get_xdata()[0] == 0
+                else:
+                    assert axis.containers[0].lines[0].get_xdata()[0] == 0
         original_save(figure, directory, name, caption, **kwargs)
 
     with monkeypatch.context() as patch:

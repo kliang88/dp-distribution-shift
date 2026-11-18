@@ -23,7 +23,7 @@ def parser():
     plot = commands.add_parser("plot", help="Create figures from retained CSV data without training")
     plot.add_argument("--input", required=True, help="Results directory, data/ directory, or runs.csv")
     plot.add_argument("--output", help="Figure directory (default: <results>/plots)")
-    plot.add_argument("--epsilon", type=float, help="Budget for overall performance (default: smallest available)")
+    plot.add_argument("--epsilon", type=float, help="Budget for overall performance (default: 1 if available, otherwise smallest)")
     plot.add_argument("--shift", choices=list(SHIFTS), help="Plot one shift type (default: all available)")
     plot.add_argument("--fraction", "--prevalence", dest="fraction", type=float,
                       help="Source share or replacement rate for performance and privacy–utility (one shift type)")
