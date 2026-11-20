@@ -4,8 +4,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=20G
-#SBATCH --time=06:00:00
+#SBATCH --mem=10G
+#SBATCH --time=01:00:00
 #SBATCH --output=logs/%u/%x_%j.out
 #SBATCH --error=logs/%u/%x_%j.err
 
@@ -33,6 +33,9 @@ fi
 
 # Each repeat worker uses one numerical thread.
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+
+# Import this checkout's src-layout package in the job and repeat workers.
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 
 echo "Job $SLURM_JOB_ID started on $(hostname) at $(date) with $WORKERS CPU workers"
 echo "Config: $CONFIG"
