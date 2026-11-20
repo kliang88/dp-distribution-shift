@@ -1,6 +1,7 @@
 """Check the public score CSV format and plotting without training."""
 
 import csv
+from io import StringIO
 import subprocess
 import sys
 
@@ -16,7 +17,7 @@ def runs():
         dict(shift_type="readmission", shift_fraction=.04, comparison_epsilon=5, repeat=repeat,
              method=method, pretraining=initialization, auprc=.12345678901234567, auroc=.61, brier=.12,
              source_fraction={"none": None, "baseline": .09, "shifted": .04}[initialization],
-             source_size=None if initialization == "none" else 20000, test_fraction=.086, test_size=6000)
+             source_size=None if initialization == "none" else 100, test_fraction=.086, test_size=200)
         for repeat in range(2) for method, initialization in tables.CONDITIONS.values()
     ])
 
@@ -29,8 +30,8 @@ def test_csv_preserves_scores_and_formats_cohort_sizes_as_integers(runs, tmp_pat
     with path.open(newline="", encoding="utf-8") as stream:
         rows = list(csv.DictReader(stream))
     assert list(rows[0]) == tables.COLUMNS
-    assert {row["source_size"] for row in rows} == {"", "20000"}
-    assert {row["test_size"] for row in rows} == {"6000"}
+    assert {row["source_size"] for row in rows} == {"", "100"}
+    assert {row["test_size"] for row in rows} == {"200"}
     assert all(not row["source_fraction"] for row in rows if row["pretraining"] == "none")
 
 
@@ -52,16 +53,17 @@ def test_invalid_model_rows_are_rejected(runs, column, value, match):
         tables.validate(runs)
 
 
-def test_missing_duplicate_and_legacy_rows_are_rejected(runs, tmp_path):
+def test_missing_and_duplicate_rows_are_rejected(runs):
     with pytest.raises(ValueError, match="Missing model"):
         tables.validate(runs.iloc[:-1])
     with pytest.raises(ValueError, match="Duplicate model"):
         tables.validate(pd.concat([runs, runs.iloc[:1]]))
+
+
+def test_legacy_csv_schema_is_rejected(runs):
     old = runs.drop(columns="test_size").assign(run_id=range(len(runs)))
-    path = tmp_path / "runs.csv"
-    old.to_csv(path, index=False)
     with pytest.raises(ValueError, match="Invalid runs.csv schema"):
-        tables.read(path)
+        tables.read(StringIO(old.to_csv(index=False)))
 
 
 def test_plot_uses_only_runs_csv_without_training_packages_or_protocol(runs, tmp_path):
@@ -87,10 +89,9 @@ main(["plot", "--input", sys.argv[1]])
     assert path.read_bytes() == original
 
 
-def test_plot_rejects_a_destination_inside_data(runs, tmp_path):
+def test_plot_rejects_a_destination_inside_data(tmp_path):
     from dp_shift.evaluation.report import run
 
-    tables.write(tmp_path / tables.RUNS_FILE, runs)
     with pytest.raises(ValueError, match="separate"):
         run(tmp_path, tmp_path / "data/plots")
     with pytest.raises(ValueError, match="separate"):
@@ -98,10 +99,34 @@ def test_plot_rejects_a_destination_inside_data(runs, tmp_path):
 
 
 @pytest.mark.parametrize("options", [{"epsilon": 999}, {"fraction": .999}])
-def test_unknown_plot_selections_fail_before_writing_figures(runs, tmp_path, options):
-    from dp_shift.evaluation.report import run
+def test_unknown_plot_selections_are_rejected(runs, monkeypatch, options):
+    from dp_shift.evaluation import report
 
-    tables.write(tmp_path / tables.RUNS_FILE, runs)
+    monkeypatch.setattr(tables, "read", lambda path: runs)
     with pytest.raises(ValueError, match="must be one of"):
-        run(tmp_path, **options)
-    assert not (tmp_path / "plots").exists()
+        report.run("unused", **options)
+
+
+def test_single_repeat_plots_omit_confidence_intervals(runs, monkeypatch):
+    from dp_shift.evaluation import plots, report
+
+    single = runs.loc[runs.repeat.eq(0)]
+    monkeypatch.setattr(tables, "read", lambda path: single)
+    captions = {}
+
+    def inspect(figure, destination, name, caption, **kwargs):
+        try:
+            captions[name] = caption
+            for axis in figure.axes:
+                for container in axis.containers:
+                    assert not getattr(container, "has_yerr", False)
+                    assert getattr(container, "errorbar", None) is None
+        finally:
+            plots.plt.close(figure)
+
+    monkeypatch.setattr(plots, "save", inspect)
+    report.run("unused")
+    assert set(captions) == set(plots.FIGURES)
+    for name in ("privacy_utility", "source_target_prevalence", "source_target_gap"):
+        assert "Single repeat. Confidence intervals require multiple repeats." in captions.pop(name)
+    assert all("Single repeat; uncertainty not estimated." in caption for caption in captions.values())

@@ -2,20 +2,16 @@
 
 from copy import deepcopy
 from dataclasses import replace
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from dp_shift.config import resolve_config
+from dp_shift.config import comparison_config, resolve_config, study_plan
 from dp_shift.data.sampling import create_source_pair
 from dp_shift.data.shifts import SHIFTS, Shift, members
 from dp_shift.data.utils import file_hash, read_json, write_json
-from dp_shift.sweep import load_plan, preflight
-
-
-BASE = Path(__file__).resolve().parents[1] / "configs/experiment.json"
+from dp_shift.sweep import preflight
 
 
 def patients():
@@ -25,10 +21,8 @@ def patients():
                              number_inpatient=np.where(index % 5 == 0, 2, 0)))
 
 
-def config(kind, fraction):
-    choices = load_plan(BASE)["base"]
-    choices["source_conditions"] = dict(pretrain_size=40, shift_type=kind, shift_fraction=fraction)
-    return resolve_config(choices)
+def config(base_config, kind, fraction):
+    return resolve_config(comparison_config(base_config, kind, fraction, epsilon=4.))
 
 
 def test_indicators_use_raw_values_and_exact_thresholds():
@@ -49,9 +43,9 @@ def test_diagnosis_indicators_use_distinct_eligible_categories():
     assert members(frame, "clinical_complexity_2plus").tolist() == [False, True, False, True, False, True, False]
 
 
-def test_diagnosis_swaps_round_counts_and_use_only_labels_with_available_matches():
+def test_diagnosis_swaps_round_counts_and_use_only_labels_with_available_matches(base_config):
     kind = "primary_diagnosis_circulatory"
-    choices = config(kind, .0625)  # 2.5 patients rounds to 2.
+    choices = config(base_config, kind, .0625)  # 2.5 patients rounds to 2.
     pool = patients()
     baseline = pool.sample(n=40, random_state=choices.seeds.s0)
     in_baseline = pool.index.isin(baseline.index)
@@ -90,12 +84,12 @@ def test_invalid_selected_trait_is_rejected(kind, column, value):
 @pytest.mark.parametrize("kind,mild,severe", [("readmission", .5, .7), ("age_70_plus", .7, .9),
                                             ("prior_inpatient_2_plus", .4, .6), ("age_70_plus", .3, .1),
                                             ("prior_inpatient_2_plus", .1, .05)])
-def test_one_sampler_preserves_labels_pairing_nesting_and_noop(kind, mild, severe):
+def test_one_sampler_preserves_labels_pairing_nesting_and_noop(base_config, kind, mild, severe):
     pool = patients()
     for repeat in range(2):
-        first = create_source_pair(pool, repeat, config(kind, mild))
-        second = create_source_pair(pool, repeat, config(kind, severe))
-        baseline = create_source_pair(pool, repeat, config("readmission", .1))["s0"]
+        first = create_source_pair(pool, repeat, config(base_config, kind, mild))
+        second = create_source_pair(pool, repeat, config(base_config, kind, severe))
+        baseline = create_source_pair(pool, repeat, config(base_config, "readmission", .1))["s0"]
         pd.testing.assert_frame_equal(first["s0"], baseline)
         pd.testing.assert_frame_equal(second["s0"], baseline)
         for name in ("added", "removed"):
@@ -104,43 +98,42 @@ def test_one_sampler_preserves_labels_pairing_nesting_and_noop(kind, mild, sever
         pd.testing.assert_series_equal(second["s1"].set_index("patient_nbr").y,
                                        pool.set_index("patient_nbr").loc[second["s1"].patient_nbr, "y"], check_names=False)
         assert set(second["s1"].y) == {0, 1}
-        equal = config(kind, mild)
+        equal = config(base_config, kind, mild)
         equal = replace(equal, shift_member_count=int(members(baseline, kind).sum()))
         pair = create_source_pair(pool, repeat, equal)
         pd.testing.assert_frame_equal(pair["s0"], pair["s1"])
         assert pair["removed"].empty and pair["added"].empty
 
 
-def test_legacy_scalar_config_normalizes_without_mutation():
-    old = load_plan(BASE)["base"]
-    old["source_conditions"] = dict(pretrain_size=20000, shifted_positive_rate=.01)
-    original = deepcopy(old)
-    assert resolve_config(old).requested.to_dict()["source_conditions"] == dict(pretrain_size=20000, shift_type="readmission", shift_fraction=.01)
-    assert old == original
+def test_legacy_scalar_config_normalizes_without_mutation(base_config):
+    base_config["source_conditions"] = dict(pretrain_size=40, shifted_positive_rate=.1)
+    original = deepcopy(base_config)
+    assert resolve_config(base_config).requested.to_dict()["source_conditions"] == {
+        "pretrain_size": 40, "shift_type": "readmission", "shift_fraction": .1,
+    }
+    assert base_config == original
 
 
-def test_enrichment_must_preserve_both_readmission_outcomes():
+def test_enrichment_must_preserve_both_readmission_outcomes(base_config):
     pool = patients()
-    choices = config("age_70_plus", .9)
+    choices = config(base_config, "age_70_plus", .9)
     selected = create_source_pair(pool, 0, choices)
     pool["y"] = pool.patient_nbr.isin(selected["removed"].patient_nbr).astype(int)
     with pytest.raises(ValueError, match="both classes"):
         create_source_pair(pool, 0, choices)
 
 
-def test_new_registry_entry_can_use_a_nonpredictor_raw_column(experiment, monkeypatch):
+def test_new_registry_entry_can_use_a_nonpredictor_raw_column(experiment_inputs, choices, monkeypatch):
     from dp_shift.data.prepare import input_fingerprints
     from dp_shift.data.preprocessing import fit_source_transformer
     from dp_shift.data.schema import load_and_validate_raw
 
-    _, _, path = experiment
+    _, path = experiment_inputs
     records = path.parent.parent / "data/records.csv"
     frame = pd.read_csv(records)
     frame["custom_flag"] = np.where(np.arange(len(frame)) % 2 == 0, "yes", "no")
     frame.to_csv(records, index=False)
     monkeypatch.setitem(SHIFTS, "custom", Shift("Custom group", ("custom_flag",), lambda data: data.custom_flag.eq("yes")))
-    choices = read_json(path)
-    choices["pretraining"]["sample_size"] = 40
     choices["comparisons"]["shifts"] = {"custom": [.7]}
     resolved = resolve_config(choices)
     parsed = load_and_validate_raw(records, resolved, input_fingerprints()["records"]["sha256"])
@@ -151,30 +144,28 @@ def test_new_registry_entry_can_use_a_nonpredictor_raw_column(experiment, monkey
     assert all("custom_flag" not in name for name in transformer.get_feature_names_out())
 
 
-def test_default_grid_is_feasible_on_local_patient_data():
-    preflight(load_plan(BASE))
+def test_feasible_grid_passes_preflight(experiment_inputs, choices):
+    choices["comparisons"]["shifts"] = {"readmission": [.1, .6], "age_70_plus": [.7]}
+    preflight(study_plan(choices))
 
 
-def test_preflight_validates_all_selected_traits_before_training(experiment):
+def test_preflight_validates_all_selected_traits_before_training(experiment, choices):
     data_root, _, path = experiment
     records = path.parent.parent / "data/records.csv"
     target_ids = pd.read_csv(data_root / "manifests/target_test.csv").patient_nbr
     frame = pd.read_csv(records)
     frame.loc[frame.patient_nbr.eq(target_ids.iloc[0]), "age"] = "unknown"
     frame.to_csv(records, index=False)
-    sweep = path.parent / "sweep.json"
-    choices = read_json(path)
     choices["comparisons"]["shifts"] = {"age_70_plus": [.7]}
-    write_json(sweep, choices)
     with pytest.raises(ValueError, match="valid ten-year age bins"):
-        preflight(load_plan(sweep))
+        preflight(study_plan(choices))
 
 
-def test_infeasible_diagnosis_shift_is_audited_before_training(experiment, monkeypatch):
+def test_infeasible_diagnosis_shift_is_audited_before_training(experiment_inputs, monkeypatch):
     from dp_shift.data.audit import SHIFT_AUDIT_FILE
     from dp_shift.sweep import run
 
-    _, output, path = experiment
+    output, path = experiment_inputs
     choices = read_json(path)
     choices["comparisons"]["shifts"] = {"primary_diagnosis_circulatory": [.2]}
     write_json(path, choices)
@@ -190,13 +181,13 @@ def test_infeasible_diagnosis_shift_is_audited_before_training(experiment, monke
     assert audit.reason.str.contains("at most 0 are possible").all()
 
 
-def test_mixed_sweep_preserves_controls_and_creates_composition_figures(experiment, monkeypatch):
+def test_mixed_sweep_preserves_controls_and_creates_composition_figures(experiment_inputs, monkeypatch):
     from dp_shift.cli import main
     from dp_shift.data.audit import SHIFT_AUDIT_FILE
     from dp_shift.evaluation import tables, plots
     from dp_shift.sweep import run, verify
 
-    _, output, path = experiment
+    output, path = experiment_inputs
     sweep = path.parent / "mixed.json"
     choices = read_json(path)
     choices["comparisons"]["shifts"] = {

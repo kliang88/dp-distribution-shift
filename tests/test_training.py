@@ -1,7 +1,6 @@
 """Small checks for optimization, privacy, and checkpoint behavior."""
 
 from dataclasses import replace
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -9,18 +8,13 @@ import torch
 from torch.nn import functional as F
 
 from dp_shift.config import PROTOCOL, SelectedHyperparameters, resolve_config
-from dp_shift.sweep import load_plan
 from dp_shift.data.utils import read_json
 from dp_shift.training.checkpoints import execute_job, load_checkpoint, save_checkpoint
 from dp_shift.training.loaders import generator, poisson_loader, source_loader
 from dp_shift.training.model import build_model, configure_cpu, model_state
-from dp_shift.training.privacy import (accounted_steps, calibrate_noise, predicted_epsilon,
-                                      private_generators, wrap_private)
+from dp_shift.training.privacy import accounted_steps, predicted_epsilon, private_generators, wrap_private
 from dp_shift.training.train import make_optimizer, pretrain_source, step_batch, train_target
 from dp_shift.training.tune import best_candidate, best_target_candidate, settings as training_settings
-
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -29,10 +23,9 @@ def cpu():
 
 
 @pytest.fixture
-def settings():
-    choices = load_plan(ROOT / "configs/experiment.json")["base"]
-    choices["tuning"]["source_epochs"] = 2
-    config = resolve_config(choices)
+def settings(base_config):
+    base_config["tuning"]["source_epochs"] = 2
+    config = resolve_config(base_config)
     return training_settings(config, .01, .01, 1)
 
 
@@ -42,10 +35,14 @@ def tiny_data(n=24, d=3):
     return {"X": x, "y": (x[:, 0] > 0).astype(np.int64), "input_dimension": d}
 
 
-def test_model_shape_checkpoint_and_fresh_optimizer(tmp_path):
+def test_model_accepts_empty_and_nonempty_batches():
     model = build_model(3, 42)
     for size in [0, 1, 7]:
         assert model(torch.zeros(size, 3)).squeeze(-1).shape == (size,)
+
+
+def test_checkpoint_round_trip_starts_with_a_fresh_optimizer(tmp_path):
+    model = build_model(3, 42)
     x = torch.ones(4, 3)
     optimizer = make_optimizer(model, .01)
     step_batch(model, optimizer, x, torch.ones(4), 4)
@@ -124,8 +121,8 @@ def test_empty_private_batch_adds_noise_and_is_accounted():
     assert any(not torch.equal(before[name], value) for name, value in model._module.state_dict().items())
 
 
-def test_private_training_budget_and_rng_permissions(tmp_path, settings):
-    sampling, noise = private_generators(tmp_path / "rng/first.pt")
+def test_private_rng_files_have_restricted_permissions_and_independent_states(tmp_path):
+    private_generators(tmp_path / "rng/first.pt")
     private_generators(tmp_path / "rng/second.pt")
     first = torch.load(tmp_path / "rng/first.pt", weights_only=True)
     second = torch.load(tmp_path / "rng/second.pt", weights_only=True)
@@ -133,7 +130,10 @@ def test_private_training_budget_and_rng_permissions(tmp_path, settings):
     assert (tmp_path / "rng/first.pt").stat().st_mode & 0o777 == 0o600
     assert not torch.equal(first["sampling"], first["noise"])
     assert not torch.equal(first["noise"], second["noise"])
-    _, result = train_target(build_model(3, 1), tiny_data(), settings, "dp_sgd", sampling, noise)
+
+
+def test_private_training_accounts_for_each_step_and_stays_within_budget(settings):
+    _, result = train_target(build_model(3, 1), tiny_data(), settings, "dp_sgd", generator(1), generator(2))
     epsilon = predicted_epsilon(settings.noise_multiplier, 1/12, 12, PROTOCOL.delta)
     assert result["steps"] == result["privacy"]["steps"] == 12
     assert result["privacy"]["epsilon_achieved"] == pytest.approx(epsilon)

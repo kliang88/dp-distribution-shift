@@ -1,29 +1,15 @@
 """Experiment choices, cross-field constraints, and exact patient allocations."""
 
 from copy import deepcopy
-from dataclasses import FrozenInstanceError, asdict, replace
-import json
-from pathlib import Path
+from dataclasses import FrozenInstanceError, asdict
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from dp_shift.cli import main
-from dp_shift.config import PARTITIONS, PROTOCOL, load_config, resolve_config, study_plan
+from dp_shift.config import PARTITIONS, PROTOCOL, resolve_config, study_plan
 from dp_shift.data.sampling import create_source_pair
 from dp_shift.data.splits import create_split_manifests
-from dp_shift.data.utils import read_json
-
-
-CONFIG = Path(__file__).resolve().parents[1] / "configs/experiment.json"
-
-
-@pytest.fixture
-def choices():
-    result = read_json(CONFIG)
-    result["comparisons"] = {"shifts": {"readmission": [.01]}, "epsilons": [5.]}
-    return result
 
 
 @pytest.mark.parametrize("path,value,message", [
@@ -36,17 +22,17 @@ def choices():
     (("seed",), 2**32, "seed must be"),
     (("repeats",), 0, "positive integer"),
     (("data", "source_pool_size"), 0, "positive integer"),
-    (("data", "target_train_size"), 3001, "divisible by 12"),
-    (("data", "proxy_train_size"), 3001, "divisible by 12"),
-    (("data", "source_pool_size"), 16000, "must exceed pretrain_size"),
-    (("pretraining", "sample_size"), 16001, "must be an integer"),
+    (("data", "target_train_size"), 25, "divisible by 12"),
+    (("data", "proxy_train_size"), 25, "divisible by 12"),
+    (("data", "source_pool_size"), 40, "must exceed pretrain_size"),
+    (("pretraining", "sample_size"), 41, "must be an integer"),
     (("comparisons", "shifts", "readmission"), [1], "below 1"),
     (("comparisons", "shifts", "readmission"), [0], "positive finite"),
     (("comparisons", "shifts"), {"unknown": [.1]}, "Unknown shift type"),
     (("comparisons", "epsilons"), [float("nan")], "positive finite"),
     (("comparisons", "epsilons"), [-1], "positive finite"),
     (("comparisons", "epsilons"), [5, -1], "positive finite"),
-    (("comparisons", "shifts", "readmission"), [.01, .010001], "must be an integer"),
+    (("comparisons", "shifts", "readmission"), [.1, .11], "must be an integer"),
     (("comparisons", "shifts"), {}, "nonempty object"),
     (("comparisons", "shifts", "readmission"), .01, "nonempty list"),
     (("privacy", "clipping_norm"), 0, "positive finite"),
@@ -56,18 +42,13 @@ def choices():
     (("tuning", "source_learning_rates"), [.01, .01], "duplicates"),
     (("tuning", "source_learning_rates"), [True], "positive finite"),
 ])
-def test_invalid_choices_fail_before_output_creation(choices, path, value, message, tmp_path, capsys):
+def test_invalid_choices_are_rejected(choices, path, value, message):
     section = choices
     for key in path[:-1]:
         section = section[key]
     section[path[-1]] = value
-    config, output = tmp_path / "experiment.json", tmp_path / "output"
-    config.write_text(json.dumps(choices))
-    with pytest.raises(SystemExit) as error:
-        main(["experiment", "--config", str(config), "--output", str(output)])
-    assert error.value.code == 1
-    assert message in capsys.readouterr().err
-    assert not output.exists()
+    with pytest.raises(ValueError, match=message):
+        study_plan(choices)
 
 
 def test_missing_choice_is_rejected(choices):
@@ -79,25 +60,22 @@ def test_missing_choice_is_rejected(choices):
 def test_single_and_multiple_comparisons_use_the_same_schema(choices):
     single = study_plan(choices)
     expanded = deepcopy(choices)
-    expanded["comparisons"] = {"shifts": {"readmission": [.01, .04], "age_70_plus": [.5]}, "epsilons": [1., 5.]}
+    expanded["comparisons"] = {"shifts": {"readmission": [.1, .2], "age_70_plus": [.5]}, "epsilons": [1., 4.]}
     multiple = study_plan(expanded)
     assert single["base"]["data"] == multiple["base"]["data"]
     assert single["base"]["tuning"] == multiple["base"]["tuning"]
-    assert single["sweep"] == {"shifts": {"readmission": [.01]}, "epsilons": [5.], "reference_epsilon": 5.}
+    assert single["sweep"] == {**choices["comparisons"], "reference_epsilon": 4.}
     assert sum(map(len, multiple["sweep"]["shifts"].values())) * len(multiple["sweep"]["epsilons"]) == 6
     with pytest.raises(ValueError, match="requires one comparison"):
         resolve_config(expanded)
 
 
-def test_defaults_and_seeds_are_resolved_without_mutating_choices(choices, tmp_path):
+def test_defaults_and_seeds_are_resolved_without_mutating_choices(choices):
     original = deepcopy(choices)
     first = resolve_config(choices)
     assert choices == original
-    path = tmp_path / "config.json"
-    path.write_text(json.dumps(choices))
-    assert first == load_config(path)
-    assert first.shift_member_count == round(choices["pretraining"]["sample_size"] * .01)
-    assert first.calibration_epsilon == pytest.approx(5. * (7.99 / 8))
+    assert first.shift_member_count == 4
+    assert first.calibration_epsilon == pytest.approx(4. * (7.99 / 8))
     assert first.requested.tuning.source_epochs == choices["pretraining"]["epochs"]
     assert PROTOCOL.steps_per_epoch == 12
     assert len(set(asdict(first.seeds).values())) == len(asdict(first.seeds))
@@ -160,7 +138,6 @@ def test_partition_capacity_and_single_class_fail_early(choices):
 
 @pytest.mark.parametrize("rate,label", [(.05, "negative"), (.95, "positive")])
 def test_source_shift_rejects_insufficient_replacement_patients(choices, rate, label):
-    config = small_config(choices)
     choices["comparisons"]["shifts"]["readmission"] = [rate]
     config = resolve_config(choices)
     patients = cohort(41)

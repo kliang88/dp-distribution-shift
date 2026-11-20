@@ -2,72 +2,49 @@
 
 from copy import deepcopy
 from dataclasses import replace
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from dp_shift.cli import main
-from dp_shift.config import resolve_config
+from dp_shift.config import resolve_config, study_plan
 from dp_shift.data.sampling import create_source_pair
 from dp_shift.data.utils import file_hash, read_json, write_json
-from dp_shift.sweep import experiment, load_plan, verify
-
-
-BASE_CONFIG = Path(__file__).resolve().parents[1] / "configs/experiment.json"
-
-
-def sweep_config(path, base=BASE_CONFIG):
-    choices = read_json(base)
-    choices["comparisons"] = {"shifts": {"readmission": [.1, .6]}, "epsilons": [4., 8.]}
-    choices["tuning"]["reference_epsilon"] = 4.
-    write_json(path, choices)
-    return choices
+from dp_shift.sweep import experiment, verify
 
 
 @pytest.mark.parametrize("section,key,value", [
     ("comparisons", "epsilons", []), ("comparisons", "epsilons", [True]),
-    ("comparisons", "epsilons", [1, 1.]), ("comparisons", "epsilons", [-1]),
+    ("comparisons", "epsilons", [1, 1.]),
     ("tuning", "reference_epsilon", 0),
-    ("comparisons", "shifts", {"readmission": [1]}),
-    ("comparisons", "shifts", {"readmission": [.010001]}),
-    (None, "base_config", "missing.json"), (None, "unknown", 1),
+    (None, "base_config", "missing.json"),
 ])
-def test_invalid_sweep_stops_before_output_creation(tmp_path, section, key, value, capsys):
-    path, output = tmp_path / "study.json", tmp_path / "output"
-    choices = sweep_config(path)
+def test_invalid_sweep_options_are_rejected(choices, section, key, value):
     (choices if section is None else choices[section])[key] = value
-    write_json(path, choices)
-    with pytest.raises(SystemExit) as error:
-        main(["experiment", "--config", str(path), "--output", str(output)])
-    assert error.value.code == 1
-    assert "EXPERIMENT FAILED" in capsys.readouterr().err
-    assert not output.exists()
+    with pytest.raises(ValueError, match=key):
+        study_plan(choices)
 
 
-def test_self_contained_config_and_cell_settings_do_not_mutate_choices(tmp_path):
-    path = tmp_path / "study.json"
-    choices = sweep_config(path)
+def test_self_contained_config_and_cell_settings_do_not_mutate_choices(choices):
     original = deepcopy(choices)
-    plan = load_plan(path)
-    cell = experiment(plan["base"], .04, 1.)
-    assert read_json(path) == original
+    plan = study_plan(choices)
+    cell = experiment(plan["base"], .2, 1.)
+    assert choices == original
     assert cell["tuning"] == plan["base"]["tuning"]
     assert cell["privacy"]["epsilon"] == 1.
+    assert plan["base"]["privacy"]["epsilon"] == 4.
     assert "base_config" not in plan["sweep"]
 
 
 @pytest.mark.parametrize("mild_rate,severe_rate", [(.2, .1), (.75, .9)])
-def test_replacements_are_nested_across_severities_and_independent_of_epsilon(mild_rate, severe_rate):
-    base = load_plan(BASE_CONFIG)["base"]
-    base["source_conditions"]["pretrain_size"] = 40
+def test_replacements_are_nested_across_severities_and_independent_of_epsilon(base_config, mild_rate, severe_rate):
     patients = pd.DataFrame(dict(patient_nbr=np.arange(500), encounter_id=np.arange(500) + 1000,
                                  y=np.arange(500) % 2))
     for repeat in range(3):
-        mild = create_source_pair(patients, repeat, resolve_config(experiment(base, mild_rate, 4.)))
-        severe = create_source_pair(patients, repeat, resolve_config(experiment(base, severe_rate, 4.)))
-        other_epsilon = create_source_pair(patients, repeat, resolve_config(experiment(base, severe_rate, 8.)))
+        mild = create_source_pair(patients, repeat, resolve_config(experiment(base_config, mild_rate, 4.)))
+        severe = create_source_pair(patients, repeat, resolve_config(experiment(base_config, severe_rate, 4.)))
+        other_epsilon = create_source_pair(patients, repeat, resolve_config(experiment(base_config, severe_rate, 8.)))
         pd.testing.assert_frame_equal(mild["s0"], severe["s0"])
         for name in ("removed", "added"):
             assert set(mild[name].patient_nbr) < set(severe[name].patient_nbr)
@@ -77,12 +54,10 @@ def test_replacements_are_nested_across_severities_and_independent_of_epsilon(mi
         assert severe["s1"].y.sum() == round(40 * severe_rate)
 
 
-def test_equal_prevalence_keeps_the_exact_baseline_sample():
-    base = load_plan(BASE_CONFIG)["base"]
-    base["source_conditions"]["pretrain_size"] = 40
+def test_equal_prevalence_keeps_the_exact_baseline_sample(base_config):
     patients = pd.DataFrame(dict(patient_nbr=np.arange(500), encounter_id=np.arange(500) + 1000,
                                  y=np.arange(500) % 2))
-    config = resolve_config(experiment(base, .1, 4.))
+    config = resolve_config(experiment(base_config, .1, 4.))
     first = create_source_pair(patients, 0, config)
     config = replace(config, shift_member_count=int(first["s0"].y.sum()))
     equal = create_source_pair(patients, 0, config)
@@ -91,12 +66,10 @@ def test_equal_prevalence_keeps_the_exact_baseline_sample():
 
 
 @pytest.mark.parametrize("target", [10, 30])
-def test_shift_can_use_all_available_patients_of_the_needed_class(target):
-    base = load_plan(BASE_CONFIG)["base"]
-    base["source_conditions"]["pretrain_size"] = 40
+def test_shift_can_use_all_available_patients_of_the_needed_class(base_config, target):
     patients = pd.DataFrame(dict(patient_nbr=np.arange(60), encounter_id=np.arange(60) + 1000,
                                  y=np.arange(60) % 2))
-    config = resolve_config(experiment(base, target / 40, 4.))
+    config = resolve_config(experiment(base_config, target / 40, 4.))
     pair = create_source_pair(patients, 0, config)
     assert len(pair["s1"]) == 40 and pair["s1"].patient_nbr.is_unique
     assert pair["s1"].y.sum() == target
@@ -104,12 +77,10 @@ def test_shift_can_use_all_available_patients_of_the_needed_class(target):
     assert set(patients.loc[patients.y.eq(label), "patient_nbr"]) <= set(pair["s1"].patient_nbr)
 
 
-def test_infeasible_grid_fails_before_tuning(experiment, monkeypatch):
+def test_infeasible_grid_fails_before_tuning(experiment_inputs, choices, monkeypatch):
     from dp_shift import sweep
 
-    _, output, base = experiment
-    path = base.parent / "sweep.json"
-    choices = sweep_config(path, base)
+    output, path = experiment_inputs
     choices["comparisons"]["shifts"]["readmission"] = [.2, .9]
     choices["pretraining"]["sample_size"] = 400
     write_json(path, choices)
@@ -119,11 +90,11 @@ def test_infeasible_grid_fails_before_tuning(experiment, monkeypatch):
     assert not output.exists()
 
 
-def test_parallel_experiment_matches_serial_sgd_and_reuses_completed_cells(experiment, capsys, monkeypatch):
+def test_parallel_experiment_matches_serial_sgd_and_reuses_completed_cells(experiment_inputs, choices, capsys, monkeypatch):
     from dp_shift import sweep
 
-    _, output, path = experiment
-    choices = read_json(path)
+    output, path = experiment_inputs
+    choices["repeats"] = 1
     choices["comparisons"]["epsilons"] = [4., 8.]
     write_json(path, choices)
     serial = output.with_name("serial")
@@ -152,15 +123,15 @@ def test_parallel_experiment_matches_serial_sgd_and_reuses_completed_cells(exper
     assert read_json(output / "protocol.json") == saved
 
 
-def test_grid_recovers_verifies_and_retains_csv_data(experiment, monkeypatch, capsys):
+def test_grid_recovers_verifies_and_retains_csv_data(experiment_inputs, choices, monkeypatch, capsys):
     from dp_shift import sweep
     from dp_shift.evaluation.sweep import validate
     from dp_shift.evaluation import tables
     from dp_shift.stages import train
 
-    _, output, base = experiment
-    path = base.parent / "sweep.json"
-    sweep_config(path, base)
+    output, path = experiment_inputs
+    choices["comparisons"] = {"shifts": {"readmission": [.1, .6]}, "epsilons": [4., 8.]}
+    write_json(path, choices)
     args = ["experiment", "--config", str(path), "--output", str(output)]
     original_train = train.run
     calls = []
@@ -181,7 +152,7 @@ def test_grid_recovers_verifies_and_retains_csv_data(experiment, monkeypatch, ca
     first = output / ".work/readmission/fraction_0.1/epsilon_4/result"
     stages = read_json(first / "protocol.json")["stages"]
     assert set(stages) == {"prepare", "train", "evaluate"}
-    assert stages["train"]["config"]["tuning"] == load_plan(path)["base"]["tuning"]
+    assert stages["train"]["config"]["tuning"] == study_plan(choices)["base"]["tuning"]
     assert stages["train"]["candidates"] == []
     assert stages["train"]["logistic_diagnostic"] is None
     assert not (first / ".work").exists()

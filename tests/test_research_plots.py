@@ -1,6 +1,7 @@
 """Inspect plotted values to check selections, paired contrasts, and repeat counts."""
 
 from itertools import product
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -80,7 +81,7 @@ def test_slide_plots_use_epsilon_five_and_average_severities_before_intervals(mo
         assert (output / f"{name}.png").read_bytes().startswith(b"\x89PNG")
 
 
-def test_figures_use_paired_repeats_and_positive_amplification(monkeypatch, tmp_path):
+def test_figures_use_paired_repeats_and_positive_amplification(monkeypatch):
     from dp_shift.evaluation import plots
 
     raw = []
@@ -110,7 +111,7 @@ def test_figures_use_paired_repeats_and_positive_amplification(monkeypatch, tmp_
 
     monkeypatch.setattr(plots, "save", inspect)
     try:
-        count = plots.plot(runs, paired_effects(runs), 100, tmp_path, epsilon=5., fractions={"readmission": .2})
+        count = plots.plot(runs, paired_effects(runs), 100, Path("plots"), epsilon=5., fractions={"readmission": .2})
         assert count == 6 and set(captured) == set(plots.FIGURES)
         overall = captured["overall_performance"].axes[0]
         bars = [container for container in overall.containers if hasattr(container, "patches")]
@@ -173,14 +174,14 @@ def test_figures_use_paired_repeats_and_positive_amplification(monkeypatch, tmp_
             plots.plt.close(figure)
 
 
-def test_performance_figures_use_planned_levels_and_matched_panel_scores(monkeypatch, tmp_path):
+def test_performance_figures_use_planned_levels_and_matched_panel_scores(monkeypatch):
     from dp_shift.evaluation import plots, report, tables
 
     scenarios = {
         "readmission": ((.01, .17), .01, "1% source readmission rate"),
-        "age_70_plus": ((.7, .8), .8, "80% of source patients aged ≥70"),
-        "primary_diagnosis_circulatory": ((.05, .1), .05, "4.9505% source replacement · Circulatory primary diagnosis"),
-        "clinical_complexity_2plus": ((.05, .1), .05, "4.9505% source replacement · ≥2 diagnosis categories"),
+        "age_70_plus": ((.7, .9), .9, "90% of source patients aged ≥70"),
+        "primary_diagnosis_circulatory": ((.05, .2), .2, "19.802% source replacement · Circulatory primary diagnosis"),
+        "clinical_complexity_2plus": ((.05, .2), .2, "19.802% source replacement · ≥2 diagnosis categories"),
     }
     rows = []
     for index, (kind, (levels, _, _)) in enumerate(scenarios.items()):
@@ -195,8 +196,7 @@ def test_performance_figures_use_planned_levels_and_matched_panel_scores(monkeyp
                              source_fraction={"none": np.nan, "baseline": .3, "shifted": subgroup}[init],
                              source_size=np.nan if init == "none" else 101, test_fraction=.1, test_size=100))
     runs = pd.DataFrame(rows, columns=tables.COLUMNS)
-    path = tmp_path / "runs.csv"
-    tables.write(path, runs)
+    monkeypatch.setattr(tables, "read", lambda path: runs)
     captured = {"overall_performance": [], "privacy_utility": []}
 
     def inspect(figure, directory, name, caption, **kwargs):
@@ -207,7 +207,7 @@ def test_performance_figures_use_planned_levels_and_matched_panel_scores(monkeyp
 
     monkeypatch.setattr(plots, "save", inspect)
     try:
-        report.run(path, progress=lambda message: None)
+        report.run("unused", progress=lambda message: None)
         figure, caption = captured["overall_performance"][0]
         assert len(figure.axes) == 4
         assert figure.axes[0].get_gridspec().get_geometry() == (2, 2)
@@ -251,7 +251,7 @@ def test_performance_figures_use_planned_levels_and_matched_panel_scores(monkeyp
                 np.testing.assert_allclose(series.lines[0].get_ydata(), means)
                 assert series.has_yerr
 
-        report.run(path, progress=lambda message: None, shift="age_70_plus", fraction=.7, epsilon=.5)
+        report.run("unused", progress=lambda message: None, shift="age_70_plus", fraction=.7, epsilon=.5)
         single, caption = captured["overall_performance"][1]
         assert len(single.axes) == 1
         assert single.axes[0].texts[0].get_text() == "70% of source patients aged ≥70"
@@ -269,7 +269,7 @@ def test_performance_figures_use_planned_levels_and_matched_panel_scores(monkeyp
                 plots.plt.close(figure)
 
 
-def test_amplification_shares_scale_and_legend_across_the_four_shift_panels(monkeypatch, tmp_path):
+def test_amplification_shares_scale_and_legend_across_the_four_shift_panels(monkeypatch):
     from dp_shift.evaluation import plots
 
     baselines = {"readmission": .09, "age_70_plus": .44,
@@ -288,7 +288,7 @@ def test_amplification_shares_scale_and_legend_across_the_four_shift_panels(monk
     captured = []
     monkeypatch.setattr(plots, "save", lambda figure, *args, **kwargs: captured.append(figure))
     try:
-        plots.dp_amplification(pd.DataFrame(rows), tmp_path, budgets,
+        plots.dp_amplification(pd.DataFrame(rows), Path("plots"), budgets,
                                dict(zip(budgets, ["red", "green", "blue"])), baselines)
         figure = captured[0]
         axes = figure.axes

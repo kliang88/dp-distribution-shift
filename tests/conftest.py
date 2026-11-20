@@ -1,23 +1,47 @@
-"""Shared synthetic experiment setup; no real test-set inference."""
-
-from pathlib import Path
+"""Small synthetic inputs shared by unit and integration tests."""
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from dp_shift.config import PROTOCOL
+from dp_shift.config import PROTOCOL, study_plan
 from dp_shift.data.features import DIAGNOSIS_COLUMNS
 from dp_shift.data.prepare import build
-from dp_shift.data.utils import read_json, write_json
-
-
-ROOT = Path(__file__).resolve().parents[1]
+from dp_shift.data.utils import write_json
 
 
 @pytest.fixture
-def experiment(tmp_path, monkeypatch):
-    experiment_config = read_json(ROOT / "configs/experiment.json")
+def choices():
+    return {
+        "schema_version": 1,
+        "seed": 42,
+        "repeats": 2,
+        "data": {
+            "source_pool_size": 500,
+            "proxy_train_size": 24,
+            "proxy_validation_size": 100,
+            "target_train_size": 24,
+            "target_test_size": 80,
+        },
+        "pretraining": {"sample_size": 40, "epochs": 1},
+        "privacy": {"clipping_norm": .7},
+        "tuning": {
+            "reference_epsilon": 4.,
+            "source_learning_rates": [.01],
+            "target_learning_rates": [.01],
+            "target_epoch_candidates": [1],
+        },
+        "comparisons": {"shifts": {"readmission": [.1]}, "epsilons": [4.]},
+    }
+
+
+@pytest.fixture
+def base_config(choices):
+    return study_plan(choices)["base"]
+
+
+@pytest.fixture
+def experiment_inputs(tmp_path, monkeypatch, choices):
     (tmp_path / "data").mkdir()
     (tmp_path / "configs").mkdir()
     n = 1000
@@ -34,18 +58,16 @@ def experiment(tmp_path, monkeypatch):
     records.to_csv(record_path, index=False)
     mapping = tmp_path / "data/mapping.csv"
     mapping.write_text("discharge_disposition_id,description\n1,Home\n")
-    experiment_config["privacy"] = dict(clipping_norm=.7)
-    experiment_config["repeats"] = 2
-    experiment_config["data"] = dict(source_pool_size=500, proxy_train_size=24,
-                                    proxy_validation_size=100, target_train_size=24, target_test_size=80)
-    experiment_config["pretraining"] = dict(sample_size=40, epochs=1)
-    experiment_config["comparisons"] = dict(shifts={"readmission": [.1]}, epsilons=[4.])
-    experiment_config["tuning"] = dict(reference_epsilon=4., source_learning_rates=[.01],
-                                      target_learning_rates=[.01], target_epoch_candidates=[1])
     config_path = tmp_path / "configs/experiment.json"
-    write_json(config_path, experiment_config)
-    data_root, output = tmp_path / "prepared", tmp_path / "experiment"
+    write_json(config_path, choices)
     monkeypatch.setattr("dp_shift.data.prepare.DEFAULT_RECORDS", record_path)
     monkeypatch.setattr("dp_shift.data.prepare.DEFAULT_MAPPING", mapping)
+    return tmp_path / "experiment", config_path
+
+
+@pytest.fixture
+def experiment(experiment_inputs):
+    output, config_path = experiment_inputs
+    data_root = output.with_name("prepared")
     build(config_path, data_root)
     return data_root, output, config_path

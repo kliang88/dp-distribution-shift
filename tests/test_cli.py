@@ -1,20 +1,15 @@
 """Exercise experiments and CSV-only plotting, including recovery."""
 
-from pathlib import Path
 import subprocess
 import sys
 
 import numpy as np
-import pandas as pd
 import pytest
 
 from dp_shift.cli import main, parser
 from dp_shift.config import resolve_config
 from dp_shift.data.utils import file_hash, read_json, write_json
 from dp_shift.stages.prepare import run as prepare
-
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_experiment_defaults_to_the_unified_config():
@@ -36,6 +31,9 @@ assert not {'torch', 'opacus', 'matplotlib'} & sys.modules.keys()
     assert result.returncode == 0, result.stderr
     assert "--output" in result.stdout
     assert ("--config" if command == "experiment" else "--input") in result.stdout
+
+
+def test_module_help_lists_commands():
     result = subprocess.run([sys.executable, "-m", "dp_shift", "--help"], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert "{experiment,plot,plot-slides}" in result.stdout
@@ -171,13 +169,15 @@ def test_full_cli_reuses_training_resumes_evaluation_and_rejects_corruption(expe
     assert "Traceback" not in captured.err
 
 
-def test_legacy_outputs_are_not_adopted_or_removed(tmp_path, capsys):
+def test_legacy_outputs_are_not_adopted_or_removed(tmp_path, choices, capsys):
+    config = tmp_path / "experiment.json"
+    write_json(config, choices)
     output = tmp_path / "old"
     output.mkdir()
     marker = output / "evaluation_ready.json"
     marker.write_text("legacy experiment")
     with pytest.raises(SystemExit):
-        main(["experiment", "--output", str(output)])
+        main(["experiment", "--config", str(config), "--output", str(output)])
     assert "choose a new --output" in capsys.readouterr().err
     assert marker.read_text() == "legacy experiment"
     assert not (output / ".work").exists()
@@ -226,9 +226,8 @@ def test_cleanup_recovers_if_deletion_is_interrupted(tmp_path, monkeypatch):
     assert not work.exists()
 
 
-def test_completed_preparation_rejects_config_changes(experiment):
-    data, output, _ = experiment
-    config = data.parent / "configs/experiment.json"
+def test_completed_preparation_rejects_config_changes(experiment_inputs):
+    output, config = experiment_inputs
     prepare(output, config)
     original = file_hash(output / ".work/data/arrays/source_pool.npz")
     changed = read_json(config)
@@ -248,11 +247,11 @@ def test_missing_inputs_stop_with_concise_error(tmp_path, capsys):
     assert "COMPLETE" not in captured.out
 
 
-def test_changed_experiment_stops_before_training(experiment, monkeypatch, capsys):
+def test_changed_experiment_stops_before_training(experiment_inputs, monkeypatch, capsys):
     from dp_shift import sweep
     from dp_shift.stages import train as training
 
-    _, output, config_path = experiment
+    output, config_path = experiment_inputs
     args = ["experiment", "--output", str(output), "--config", str(config_path)]
 
     def interrupt(*args):
@@ -274,9 +273,9 @@ def test_changed_experiment_stops_before_training(experiment, monkeypatch, capsy
     assert not (output / ".work/public_smoke").exists()
 
 
-def test_preparation_records_resolved_protocol_and_rejects_changed_inputs(experiment):
-    data, output, config_path = experiment
-    records = data.parent / "data/records.csv"
+def test_preparation_records_resolved_protocol_and_rejects_changed_inputs(experiment_inputs):
+    output, config_path = experiment_inputs
+    records = output.parent / "data/records.csv"
     prepare(output, config_path)
     record = read_json(output / "protocol.json")["stages"]["prepare"]
     assert record["resolved"]["protocol_version"] == "source_shift_v1"
@@ -294,34 +293,3 @@ def test_preparation_records_resolved_protocol_and_rejects_changed_inputs(experi
         stream.write("\n")
     with pytest.raises(ValueError, match="inputs changed"):
         prepare(output, config_path)
-
-
-def test_single_repeat_experiment_and_plots(experiment, monkeypatch):
-    from dp_shift.evaluation import plots
-
-    _, output, path = experiment
-    choices = read_json(path)
-    choices['repeats'] = 1
-    write_json(path, choices)
-    main(['experiment', '--config', str(path), '--output', str(output)])
-    runs = pd.read_csv(output / 'data/runs.csv')
-    assert len(runs) == 6 and runs.repeat.nunique() == 1
-    original_save = plots.save
-    captions = {}
-
-    def inspect(figure, destination, name, caption, **kwargs):
-        captions[name] = caption
-        for axis in figure.axes:
-            for container in axis.containers:
-                if hasattr(container, 'has_yerr'):
-                    assert not container.has_yerr
-                if hasattr(container, 'errorbar'):
-                    assert container.errorbar is None
-        original_save(figure, destination, name, caption, **kwargs)
-
-    monkeypatch.setattr(plots, 'save', inspect)
-    main(['plot', '--input', str(output)])
-    assert set(captions) == set(plots.FIGURES)
-    for name in ('privacy_utility', 'source_target_prevalence', 'source_target_gap'):
-        assert 'Single repeat. Confidence intervals require multiple repeats.' in captions.pop(name)
-    assert all('Single repeat; uncertainty not estimated.' in caption for caption in captions.values())

@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import replace
-from pathlib import Path
+from io import BytesIO
 import shutil
 
 import joblib
@@ -11,7 +11,6 @@ import pandas as pd
 import pytest
 
 from dp_shift.config import PARTITIONS, PROTOCOL, resolve_config
-from dp_shift.sweep import load_plan
 from dp_shift.data.artifacts import (PATH_IDS, load_evaluation_data, load_training_data,
                                      validate_evaluation_manifest, verify_artifacts)
 from dp_shift.data.cohort import build_cohort
@@ -25,16 +24,12 @@ from dp_shift.data.splits import manifest, rows_for_manifest
 from dp_shift.data.utils import file_hash, read_json, write_json
 
 
-ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = ROOT / "configs/experiment.json"
-
-
 @pytest.fixture
-def config():
-    return resolve_config(load_plan(CONFIG_PATH)["base"])
+def config(base_config):
+    return resolve_config(base_config)
 
 
-def make_frame(n, config):
+def make_frame(n):
     frame = pd.DataFrame({name: np.arange(n, dtype=float) + i
                           for i, name in enumerate(list(PROTOCOL.numeric_features))})
     for name in PROTOCOL.categorical_features:
@@ -53,8 +48,8 @@ def save_raw(frame, path):
     frame.drop(columns="y").to_csv(path, index=False)
 
 
-def test_index_selection_precedes_exclusion(config):
-    frame = make_frame(4, config)
+def test_index_selection_precedes_exclusion():
+    frame = make_frame(4)
     frame["patient_nbr"] = [1, 1, 2, 2]
     frame["encounter_id"] = [10, 20, 30, 40]
     frame["discharge_disposition_id"] = ["11", "1", "1", "1"]
@@ -65,7 +60,7 @@ def test_index_selection_precedes_exclusion(config):
 
 
 def test_raw_parser_preserves_large_integer_ids_and_literal_categories(tmp_path, config):
-    frame = make_frame(2, config)
+    frame = make_frame(2)
     frame["patient_nbr"] = [9007199254740993, 9007199254740994]
     frame["race"] = ["None", "?"]
     frame["admission_type_id"] = ["1.0", "2"]
@@ -84,7 +79,7 @@ def test_raw_parser_preserves_large_integer_ids_and_literal_categories(tmp_path,
 @pytest.mark.parametrize("feature", FIXED_CATEGORIES)
 def test_raw_parser_requires_expanded_features(tmp_path, config, feature):
     path = tmp_path / "records.csv"
-    save_raw(make_frame(2, config).drop(columns=feature), path)
+    save_raw(make_frame(2).drop(columns=feature), path)
     with pytest.raises(ValueError, match=f"Missing required columns: .*{feature}"):
         load_and_validate_raw(path, config, file_hash(path))
 
@@ -113,7 +108,7 @@ def test_diagnosis_category(code, category):
 ])
 def test_raw_parser_rejects_invalid_data(tmp_path, config, column, value, error):
     path = tmp_path / "records.csv"
-    save_raw(make_frame(2, config), path)
+    save_raw(make_frame(2), path)
     frame = pd.read_csv(path, dtype=str)
     frame.loc[1, column] = value
     frame.to_csv(path, index=False)
@@ -123,7 +118,7 @@ def test_raw_parser_rejects_invalid_data(tmp_path, config, column, value, error)
 
 def test_raw_fingerprint_and_duplicate_headers(tmp_path, config):
     path = tmp_path / "records.csv"
-    save_raw(make_frame(2, config), path)
+    save_raw(make_frame(2), path)
     with pytest.raises(ValueError, match="fingerprint"):
         load_and_validate_raw(path, config, "wrong fingerprint")
     lines = path.read_text().splitlines()
@@ -133,7 +128,7 @@ def test_raw_fingerprint_and_duplicate_headers(tmp_path, config):
 
 
 def test_source_pair_replaces_positives_without_changing_size(config):
-    pool = make_frame(100, config)
+    pool = make_frame(100)
     choices = config.requested.to_dict()
     choices["source_conditions"].update(pretrain_size=20, shift_fraction=.05)
     config = resolve_config(choices)
@@ -148,8 +143,8 @@ def test_source_pair_replaces_positives_without_changing_size(config):
         create_source_pair(pool, 0, config)
 
 
-def test_preprocessing_uses_source_statistics_and_survives_unseen_categories(tmp_path, config):
-    source = make_frame(4, config)
+def test_preprocessing_uses_source_statistics_and_survives_unseen_categories():
+    source = make_frame(4)
     source["number_outpatient"] = [0., 1., 3., 7.]
     source.loc[0, "time_in_hospital"] = np.nan
     transformer = fit_source_transformer(source)
@@ -166,25 +161,27 @@ def test_preprocessing_uses_source_statistics_and_survives_unseen_categories(tmp
     np.testing.assert_allclose(before["scales"], values.std(axis=0))
     np.testing.assert_allclose(transform_features(transformer, source)[:, :8],
                                (values - values.mean(axis=0)) / values.std(axis=0), atol=1e-6)
-    target = make_frame(2, config)
+    target = make_frame(2)
     target["race"] = ["unseen", np.nan]
     target.loc[0, "time_in_hospital"] = 1e8
     target.loc[1, "number_outpatient"] = np.nan
     transformed = transform_features(transformer, target)
     assert np.isfinite(transformed).all() and transformed.shape[1] == before["input_dimension"]
     assert transformer_metadata(transformer, source) == before
-    joblib.dump(transformer, tmp_path / "transformer.joblib")
-    np.testing.assert_array_equal(transformed, transform_features(joblib.load(tmp_path / "transformer.joblib"), target))
+    serialized = BytesIO()
+    joblib.dump(transformer, serialized)
+    serialized.seek(0)
+    np.testing.assert_array_equal(transformed, transform_features(joblib.load(serialized), target))
     source["num_medications"] = np.nan
     with pytest.raises(ValueError, match="entire source numerical"):
         fit_source_transformer(source)
 
 
-def test_fixed_categories_encode_values_absent_from_source(config):
-    source = make_frame(4, config)
+def test_fixed_categories_encode_values_absent_from_source():
+    source = make_frame(4)
     transformer = fit_source_transformer(source)
     metadata = transformer_metadata(transformer, source)
-    target = make_frame(2, config)
+    target = make_frame(2)
     target["diag_1"] = ["V45.85", "414.01"]
     target["diag_2"] = ["E888.9", "272.4"]
     target["diag_3"] = ["bad", "?"]
@@ -200,8 +197,8 @@ def test_fixed_categories_encode_values_absent_from_source(config):
                                       np.equal.outer(expected[feature], categories))
 
 
-def test_manifest_lookup_aligns_rows_by_id(config):
-    frame = make_frame(10, config)
+def test_manifest_lookup_aligns_rows_by_id():
+    frame = make_frame(10)
     membership = manifest(frame.iloc[[8, 1, 6]])
     actual = rows_for_manifest(frame.sample(frac=1, random_state=1), membership)
     np.testing.assert_array_equal(actual.y, frame.iloc[[8, 1, 6]].y)
@@ -211,25 +208,18 @@ def test_manifest_lookup_aligns_rows_by_id(config):
         rows_for_manifest(frame, membership)
 
 
-@pytest.fixture(scope="module")
-def prepared(tmp_path_factory):
-    output = tmp_path_factory.mktemp("real_data") / "prepared"
-    path = output.parent / "config.json"
-    write_json(path, load_plan(CONFIG_PATH)["base"])
-    summary = build(path, output)
-    return output, summary
-
-
-def test_real_data_build_and_reproducibility(prepared, tmp_path):
-    output, summary = prepared
-    choices = load_plan(CONFIG_PATH)["base"]
+def test_build_is_reproducible(synthetic_project):
+    output, directory, summary = synthetic_project
+    config = directory / "configs/test.json"
+    inputs = directory / "data/records.csv", directory / "data/mapping.csv"
+    choices = read_json(config)
     repeats = choices["repeats"]
     source = choices["source_conditions"]
     expected_positive_n = round(source["pretrain_size"] * source["shift_fraction"])
     preprocessing = read_json(output / "preprocessing/metadata.json")
     expected_dimension = len(preprocessing["numeric_features"]) + sum(
         len(categories) for categories in preprocessing["categories"].values())
-    assert summary == {"patients": 69973, "input_dimension": expected_dimension, "source_pairs": repeats,
+    assert summary == {"patients": 400, "input_dimension": expected_dimension, "source_pairs": repeats,
                        "target_train_n": choices["data"]["target_train_size"]}
     assert not (output / "evaluation").exists()
     assert not (output / "arrays/target_test.npz").exists()
@@ -238,8 +228,8 @@ def test_real_data_build_and_reproducibility(prepared, tmp_path):
     np.testing.assert_allclose(numeric.mean(axis=0, dtype=np.float64), 0, atol=1e-6)
     np.testing.assert_allclose(numeric.std(axis=0, dtype=np.float64), 1, atol=1e-6)
     # An independent build checks repeatability of manifests and encoded arrays.
-    second = tmp_path / "rebuilt"
-    assert build(output.parent / "config.json", second) == summary
+    second = directory / "rebuilt"
+    assert build(config, second, *inputs) == summary
     for name in ["source_pool", "proxy_train", "proxy_validation", "target_train"]:
         first_bundle = load_training_data(output, name)
         other_bundle = load_training_data(second, name)
@@ -255,11 +245,11 @@ def test_real_data_build_and_reproducibility(prepared, tmp_path):
         for name in ["s0", "s1", "removed", "added"]:
             relative = f"source_pairs/repeat_{repeat:02d}/{name}.csv"
             assert (output / relative).read_bytes() == (second / relative).read_bytes()
-    assert build(output.parent / "config.json", output) == summary  # Existing matching artifacts are reused.
+    assert build(config, output, *inputs) == summary
 
 
-def test_diagnosis_audit_covers_cohort_partitions_and_source_samples(prepared):
-    output, summary = prepared
+def test_diagnosis_audit_covers_cohort_partitions_and_source_samples(synthetic_project):
+    output, _, summary = synthetic_project
     audit = pd.read_csv(output / "audit/diagnosis_category_counts.csv")
     cohort = audit[audit.scope.eq("cohort")]
     partitions = audit[audit.scope.eq("partition")]
@@ -276,8 +266,8 @@ def test_diagnosis_audit_covers_cohort_partitions_and_source_samples(prepared):
     np.testing.assert_allclose(audit.fraction, audit["count"] / audit.total)
 
 
-def test_artifact_corruption_and_incomplete_output_are_rejected(prepared, tmp_path):
-    output, _ = prepared
+def test_artifact_corruption_and_incomplete_output_are_rejected(synthetic_project, tmp_path):
+    output, _, summary = synthetic_project
     with pytest.raises(ValueError, match="no COMPLETE"):
         verify_artifacts(tmp_path)
     corrupted = tmp_path / "corrupted"
@@ -289,32 +279,29 @@ def test_artifact_corruption_and_incomplete_output_are_rejected(prepared, tmp_pa
     with pytest.raises(ValueError, match="Unsupported training partition"):
         load_training_data(output, "target_test")
     with pytest.raises(ValueError, match="repeat ID"):
-        load_training_data(output, "s1", read_json(CONFIG_PATH)["repeats"])
+        load_training_data(output, "s1", summary["source_pairs"])
 
 
 @pytest.fixture
-def synthetic_project(tmp_path, config):
-    # Evaluation plumbing is tested with synthetic patients, never real test data.
+def synthetic_project(tmp_path, base_config):
     (tmp_path / "data").mkdir()
     (tmp_path / "configs").mkdir()
     records = tmp_path / "data/records.csv"
-    save_raw(make_frame(400, config), records)
+    save_raw(make_frame(400), records)
     mapping = tmp_path / "data/mapping.csv"
     mapping.write_text("discharge_disposition_id,description\n1,Home\n")
-    experiment = config.requested.to_dict()
-    experiment["repeats"] = 2
-    experiment["data"] = dict(source_pool_size=200, proxy_train_size=24, proxy_validation_size=40,
+    base_config["data"] = dict(source_pool_size=200, proxy_train_size=24, proxy_validation_size=40,
                               target_train_size=24, target_test_size=32)
-    experiment["source_conditions"] = dict(pretrain_size=40, shift_type="readmission", shift_fraction=.05)
+    base_config["source_conditions"]["shift_fraction"] = .05
     path = tmp_path / "configs/test.json"
-    write_json(path, experiment)
+    write_json(path, base_config)
     output = tmp_path / "prepared"
-    build(path, output, records, mapping)
-    return output, tmp_path
+    summary = build(path, output, records, mapping)
+    return output, tmp_path, summary
 
 
 def test_deferred_test_requires_complete_evaluation_manifest(synthetic_project, monkeypatch):
-    output, directory = synthetic_project
+    output, directory, _ = synthetic_project
     complete = read_json(output / "COMPLETE.json")
     checkpoint, analysis = directory / "checkpoint.bin", directory / "analysis.py"
     checkpoint.write_bytes(b"synthetic checkpoint")
@@ -348,7 +335,7 @@ def test_deferred_test_requires_complete_evaluation_manifest(synthetic_project, 
 
 
 def test_changed_config_and_failed_build_do_not_overwrite_output(synthetic_project):
-    output, directory = synthetic_project
+    output, directory, _ = synthetic_project
     config_path = directory / "configs/test.json"
     config = read_json(config_path)
     original_marker = (output / "COMPLETE.json").read_bytes()
