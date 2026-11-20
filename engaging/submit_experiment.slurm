@@ -31,7 +31,7 @@ if [[ ! -r "$CONFIG" ]]; then
     exit 1
 fi
 
-# Each comparison worker uses one numerical thread.
+# Each repeat worker uses one numerical thread.
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 
 echo "Job $SLURM_JOB_ID started on $(hostname) at $(date) with $WORKERS CPU workers"

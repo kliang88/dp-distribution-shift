@@ -1,60 +1,39 @@
-"""Check paired effects, uncertainty, and cache alignment."""
+"""Check that signed plots compare paired scores in the intended direction."""
 
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.stats import t
 
-from dp_shift.data.utils import file_hash, write_json
-from dp_shift.evaluation.metrics import validate_probabilities
-from dp_shift.evaluation.score import read_prediction_cache
-from dp_shift.evaluation.summarize import interval, paired_effects
-from dp_shift.evaluation.tables import CONDITIONS
+from dp_shift.evaluation.summarize import interaction, interval, signed_effects
+from dp_shift.evaluation.tables import METRICS, MODEL_KEYS
 
 
-@pytest.mark.parametrize("labels,probability", [
-    ([0, 1], [.2]), ([0, 1], [np.nan, .2]), ([0, 1], [-.1, .2]),
-    ([0, 1], [.2, 1.1]), ([0, 0], [.1, .2]), ([0, 2], [.1, .2]),
-])
-def test_invalid_predictions_fail(labels, probability):
-    with pytest.raises(ValueError):
-        validate_probabilities(labels, probability)
+def test_baseline_join_pairs_by_repeat_method_and_privacy_budget():
+    rows = [
+        (1, "baseline", 0, "SGD", None, .20, .6, .1),
+        (1, "baseline", 0, "DP-SGD", 5., .18, .6, .1),
+        (1, "baseline", 0, "DP-SGD", 10., .19, .6, .1),
+        (1, "scratch", 0, "SGD", None, .17, .6, .1),
+        (1, "scratch", 0, "DP-SGD", 5., .15, .6, .1),
+        (1, "scratch", 0, "DP-SGD", 10., .17, .6, .1),
+        (1, "age", -8, "SGD", None, .18, .6, .1),
+        (1, "age", -8, "DP-SGD", 5., .13, .6, .1),
+        (1, "age", -8, "DP-SGD", 10., .18, .6, .1),
+        (2, "baseline", 0, "SGD", None, .30, .6, .1),
+        (2, "scratch", 0, "SGD", None, .34, .6, .1),
+        (2, "age", -8, "SGD", None, .31, .6, .1),
+    ]
+    scores = pd.DataFrame(rows, columns=[*MODEL_KEYS, *METRICS])
+    effects = signed_effects(scores)
+    np.testing.assert_allclose(effects.gain, [-.02, -.05, -.01, .01])
+    extra = interaction(effects).set_index("epsilon").interaction
+    assert extra.to_dict() == pytest.approx({5.: .03, 10.: -.01})
+    np.testing.assert_allclose(signed_effects(scores, reference="scratch").gain, [.01, -.02, .01, -.03])
 
 
-def test_paired_effects_cancel_scratch_and_use_positive_dp_amplification():
-    scores = {"A": .1, "B-S0": .13, "B-S1": .12, "C": .08, "D-S0": .12, "D-S1": .09}
-    runs = pd.DataFrame([
-        dict(shift_type="readmission", shift_fraction=.04, comparison_epsilon=5,
-             repeat=repeat, method=method, pretraining=initialization, auprc=scores[path] + repeat * .1)
-        for repeat in range(2) for path, (method, initialization) in CONDITIONS.items()
-    ])
-    effects = paired_effects(runs)
-    np.testing.assert_allclose(effects.gain_sgd_baseline, .03)
-    np.testing.assert_allclose(effects.shift_penalty_sgd, .01)
-    np.testing.assert_allclose(effects.shift_penalty_dp, .03)
-    np.testing.assert_allclose(effects.dp_amplification, .02)
-    runs.loc[runs.pretraining.eq("none"), "auprc"] += .5
-    np.testing.assert_allclose(effects.dp_amplification, paired_effects(runs).dp_amplification)
-
-
-def test_t_interval_and_zero_variance():
-    result = interval([1, 3])
-    assert result["mean"] == 2 and result["sd"] == pytest.approx(np.sqrt(2))
-    assert result["ci_lower"] == pytest.approx(2 - 12.706204736432095)
-    assert result["ci_upper"] == pytest.approx(2 + 12.706204736432095)
-    result = interval([.002] * 10)
-    assert result["ci_lower"] == pytest.approx(.002) and result["ci_upper"] == pytest.approx(.002)
-
-
-def test_single_repeat_has_a_score_without_uncertainty():
-    result = interval([.02])
-    assert result["mean"] == .02
-    assert all(np.isnan(result[key]) for key in ("sd", "ci_lower", "ci_upper"))
-
-
-def test_cache_alignment_is_checked_independently_of_file_hash(tmp_path):
-    path = tmp_path / "prediction.npz"
-    np.savez_compressed(path, row_id=np.array([1, 0], dtype=np.int64), probability=np.array([.2, .8], dtype=np.float32))
-    expected = {"status": "complete", "n": 2}
-    write_json(path.with_suffix(".json"), {**expected, "prediction_sha256": file_hash(path)})
-    with pytest.raises(ValueError, match="row IDs"):
-        read_prediction_cache(path, path.with_suffix(".json"), expected, np.array([0, 1]))
+def test_interval_uses_repeat_level_sample_variance():
+    mean, half_width = interval([1, 3])
+    assert mean == 2 and half_width == pytest.approx(t.ppf(.975, 1))
+    mean, half_width = interval([.01])
+    assert mean == .01 and np.isnan(half_width)

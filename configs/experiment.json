@@ -1,5 +1,4 @@
 {
-  "schema_version": 1,
   "seed": 20261107,
   "repeats": 20,
   "data": {
@@ -34,39 +33,21 @@
       32
     ]
   },
-  "comparisons": {
-    "shifts": {
-      "readmission": [
-        0.01,
-        0.04,
-        0.14,
-        0.17
-      ],
-      "age_70_plus": [
-        0.6,
-        0.7,
-        0.8,
-        0.9
-      ],
-      "primary_diagnosis_circulatory": [
-        0.05,
-        0.10,
-        0.15,
-        0.20
-      ],
-      "clinical_complexity_2plus": [
-        0.05,
-        0.10,
-        0.15,
-        0.20
-      ]
-    },
-    "epsilons": [
-      1.0,
-      2.5,
-      5.0,
-      7.5,
-      10.0
-    ]
-  }
+  "shift_pp": [
+    -8,
+    -6,
+    -4,
+    -2,
+    2,
+    4,
+    6,
+    8
+  ],
+  "epsilons": [
+    1.0,
+    2.5,
+    5.0,
+    7.5,
+    10.0
+  ]
 }

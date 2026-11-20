@@ -1,7 +1,5 @@
 """One MLP shared by every training path."""
 
-import hashlib
-
 import torch
 from torch import nn
 
@@ -15,16 +13,6 @@ def build_model(input_dimension, seed):
 
 def model_state(model):
     return {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
-
-
-def state_hash(state):
-    digest = hashlib.sha256()
-    for name, value in sorted(state.items()):
-        digest.update(name.encode())
-        digest.update(str(tuple(value.shape)).encode())
-        digest.update(str(value.dtype).encode())
-        digest.update(value.detach().cpu().contiguous().numpy().tobytes())
-    return digest.hexdigest()
 
 
 def configure_cpu():

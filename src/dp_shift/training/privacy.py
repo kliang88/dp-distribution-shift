@@ -2,12 +2,9 @@
 
 from functools import lru_cache
 import math
-import os
-from pathlib import Path
 import secrets
 import warnings
 
-import torch
 from opacus import PrivacyEngine
 from opacus.accountants import PRVAccountant
 from opacus.accountants.utils import get_noise_multiplier
@@ -22,11 +19,15 @@ def accounted_steps(accountant):
     return sum(count for _, _, count in accountant.history)
 
 
-def predicted_epsilon(noise_multiplier, sample_rate, steps, delta):
+@lru_cache(maxsize=64)
+def history_epsilon(history, delta):
     accountant = PRVAccountant()
-    for _ in range(steps):
-        accountant.step(noise_multiplier=noise_multiplier, sample_rate=sample_rate)
+    accountant.history = list(history)
     return float(accountant.get_epsilon(delta=delta))
+
+
+def predicted_epsilon(noise_multiplier, sample_rate, steps, delta):
+    return history_epsilon(((noise_multiplier, sample_rate, steps),), delta)
 
 
 @lru_cache(maxsize=32)
@@ -62,22 +63,14 @@ def wrap_private(model, optimizer, loader, noise_multiplier, clipping_norm, nois
 def privacy_summary(engine, settings, steps):
     actual_steps = accounted_steps(engine.accountant)
     require(actual_steps == steps, "Accountant and optimizer step counts disagree")
-    epsilon = float(engine.get_epsilon(delta=PROTOCOL.delta))
-    require(math.isfinite(epsilon) and epsilon <= settings.config.requested.privacy.epsilon, "Achieved epsilon exceeds the budget")
+    history = tuple(engine.accountant.history)
+    epsilon = history_epsilon(history, PROTOCOL.delta)
+    require(math.isfinite(epsilon) and epsilon <= settings.epsilon, "Achieved epsilon exceeds the budget")
     return {"accountant": "prv", "epsilon_achieved": epsilon, "delta": PROTOCOL.delta,
-            "noise_multiplier": settings.noise_multiplier, "clipping_norm": settings.config.requested.privacy.clipping_norm,
+            "noise_multiplier": settings.noise_multiplier, "clipping_norm": settings.config.clipping_norm,
             "sampling_rate": 1 / PROTOCOL.steps_per_epoch, "steps": actual_steps,
             "accountant_history": [list(entry) for entry in engine.accountant.history]}
 
 
-def private_generators(path):
-    """Store replay states locally before using them; never put seeds in run metadata."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, 0o700)
-    sampling = generator(secrets.randbits(63))
-    noise = generator(secrets.randbits(63))
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "wb") as stream:
-        torch.save({"sampling": sampling.get_state(), "noise": noise.get_state()}, stream)
-    return sampling, noise
+def private_generators():
+    return generator(secrets.randbits(63)), generator(secrets.randbits(63))

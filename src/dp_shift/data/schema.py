@@ -6,11 +6,11 @@ import re
 import numpy as np
 import pandas as pd
 
-from dp_shift.config import PROTOCOL, ResolvedConfig
+from dp_shift.config import PROTOCOL
 
 from .features import FIXED_CATEGORIES
 from .utils import file_hash, require
-from .shifts import SHIFTS, members
+from .shifts import SHIFTS
 
 
 def integer_value(value):
@@ -23,20 +23,18 @@ def integer_value(value):
     return result
 
 
-def load_and_validate_raw(path, config: ResolvedConfig, expected_hash):
-    require(file_hash(path) == expected_hash, "Raw records fingerprint does not match config")
+def load_and_validate_raw(path, expected_hash=None):
     with open(path, newline="") as stream:
         header = next(csv.reader(stream), [])
     require(bool(header), "Empty records CSV")
     require(len(header) == len(set(header)), "Duplicate CSV column names")
     features = [*PROTOCOL.numeric_features, *PROTOCOL.categorical_features, *FIXED_CATEGORIES]
-    required = list(dict.fromkeys(["patient_nbr", "encounter_id", "readmitted", *features,
-                                   *SHIFTS[config.requested.source_conditions.shift_type].columns]))
+    required = ["patient_nbr", "encounter_id", "readmitted", *features]
     require(set(required).issubset(header), f"Missing required columns: {set(required) - set(header)}")
-    available_traits = {column for shift in SHIFTS.values() for column in shift.columns} & set(header)
-    columns = list(dict.fromkeys([*required, *sorted(available_traits)]))
-    frame = pd.read_csv(path, usecols=columns, dtype=str,
+    frame = pd.read_csv(path, usecols=required, dtype=str,
                         keep_default_na=False, na_values=["?", ""], low_memory=False)
+    if expected_hash is not None:
+        require(file_hash(path) == expected_hash, "Raw records fingerprint does not match config")
     for name in ["patient_nbr", "encounter_id"]:
         require(frame[name].notna().all(), f"Missing {name}")
         frame[name] = frame[name].map(integer_value).astype("int64")
@@ -57,21 +55,5 @@ def load_and_validate_raw(path, config: ResolvedConfig, expected_hash):
         )
     frame["y"] = frame.readmitted.eq("<30").astype("int64")
     frame = frame.drop(columns="readmitted")
-    members(frame, config.requested.source_conditions.shift_type)
+    SHIFTS["age"](frame)
     return frame
-
-
-def discharge_descriptions(path):
-    descriptions = {}
-    in_discharge_section = False
-    with open(path, newline="") as stream:
-        for row in csv.reader(stream):
-            if not row or not row[0].strip():
-                continue
-            if row[0] == "discharge_disposition_id":
-                in_discharge_section = True
-            elif row[0].endswith("_id"):
-                in_discharge_section = False
-            elif in_discharge_section:
-                descriptions[str(integer_value(row[0]))] = row[1].strip()
-    return descriptions

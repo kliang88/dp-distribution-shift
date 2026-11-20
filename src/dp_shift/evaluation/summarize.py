@@ -1,36 +1,32 @@
-"""Paired metric effects and uncertainty across repeats on a fixed test set."""
+"""Pair each shifted score with its shared control within a repeat."""
 
 import numpy as np
-import pandas as pd
 from scipy.stats import t
 
 from dp_shift.config import PROTOCOL
-from dp_shift.data.utils import require
-from .tables import GRID
+from dp_shift.data.shifts import SHIFTS
 
 
-def paired_effects(runs, *, metric="auprc"):
-    """Calculate contrasts within each comparison and repeat of a validated table."""
-    scores = runs.pivot(index=[*GRID, "repeat"], columns=["method", "pretraining"], values=metric)
-    sgd, dp = scores["sgd"], scores["dp_sgd"]
-    penalty_sgd = sgd.baseline - sgd.shifted
-    penalty_dp = dp.baseline - dp.shifted
-    return pd.DataFrame({
-        "gain_sgd_baseline": sgd.baseline - sgd["none"],
-        "gain_sgd_shifted": sgd.shifted - sgd["none"],
-        "gain_dp_baseline": dp.baseline - dp["none"],
-        "gain_dp_shifted": dp.shifted - dp["none"],
-        "shift_penalty_sgd": penalty_sgd,
-        "shift_penalty_dp": penalty_dp,
-        "dp_amplification": penalty_dp - penalty_sgd,
-    }).reset_index()
-
-
-def interval(values, confidence=PROTOCOL.confidence_level):
+def interval(values):
     values = np.asarray(values, dtype=float)
-    require(values.ndim == 1 and len(values) >= 1 and np.isfinite(values).all(), "Invalid repeat values")
-    if len(values) == 1:
-        return {"n": 1, "mean": float(values[0]), "sd": np.nan, "ci_lower": np.nan, "ci_upper": np.nan}
-    mean, sd = float(values.mean()), float(values.std(ddof=1))
-    margin = float(t.ppf((1 + confidence) / 2, len(values) - 1) * sd / np.sqrt(len(values)))
-    return {"n": len(values), "mean": mean, "sd": sd, "ci_lower": mean - margin, "ci_upper": mean + margin}
+    mean = float(values.mean())
+    n = len(values)
+    half_width = t.ppf((1 + PROTOCOL.confidence_level) / 2, n - 1) * values.std(ddof=1) / np.sqrt(n) if n > 1 else np.nan
+    return mean, float(half_width)
+
+
+def signed_effects(results, metric="auprc", *, reference="baseline"):
+    keys = ["repeat", "method", "epsilon"]
+    control = results.loc[results.shift_type.eq(reference), [*keys, metric]].rename(columns={metric: "control_score"})
+    shifted = results.loc[results.shift_type.isin(SHIFTS)]
+    effects = shifted.merge(control, on=keys, validate="many_to_one")
+    return effects.assign(gain=effects[metric] - effects.control_score)
+
+
+def interaction(effects):
+    keys = ["repeat", "shift_type", "shift_pp"]
+    ordinary = effects.loc[effects.method.eq("SGD"), [*keys, "gain"]]
+    private = effects.loc[effects.method.eq("DP-SGD"), [*keys, "epsilon", "gain"]]
+    values = private.merge(ordinary, on=keys, suffixes=("_dp", "_sgd"), validate="many_to_one")
+    values["interaction"] = values.gain_sgd - values.gain_dp
+    return values[[*keys, "epsilon", "interaction"]]

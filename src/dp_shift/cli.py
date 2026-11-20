@@ -1,75 +1,51 @@
-"""Run readmission experiments or create plots from retained CSV data."""
+"""Run the signed source-shift study or plot saved results."""
 
 import argparse
 from pathlib import Path
 import sys
 
 from .config import DEFAULT_CONFIG
-from .data.shifts import SHIFTS
 
-DEFAULT_OUTPUT = "results/prevalence_shift_v3"
+
+DEFAULT_OUTPUT = "results/signed_source_shift"
 
 
 def parser():
     cli = argparse.ArgumentParser(prog="dp-shift", description=__doc__)
     commands = cli.add_subparsers(dest="command", required=True)
-    experiment = commands.add_parser("experiment", help="Run every configured comparison and publish verified results")
-    experiment.add_argument("--output", default=DEFAULT_OUTPUT,
-                            help="Results directory (default: %(default)s)")
-    experiment.add_argument("--config", default=DEFAULT_CONFIG,
-                            help="Configuration (default: %(default)s)")
-    experiment.add_argument("--workers", type=int, default=1,
-                            help="Number of CPU processes for comparison cells (default: %(default)s)")
-    plot = commands.add_parser("plot", help="Create figures from retained CSV data without training")
-    slides = commands.add_parser("plot-slides", help="Create AUPRC and AUROC figures for slides 6 and 7 at ε=5")
-    for command, directory in ((plot, "plots"), (slides, "plots/slides")):
-        command.add_argument("--input", required=True, help="Results directory, data/ directory, or runs.csv")
-        command.add_argument("--output", help=f"Figure directory (default: <results>/{directory})")
-    plot.add_argument("--epsilon", type=float, help="Budget for overall performance (default: 1 if available, otherwise smallest)")
-    plot.add_argument("--shift", choices=list(SHIFTS), help="Plot one shift type (default: all available)")
-    plot.add_argument("--fraction", "--prevalence", dest="fraction", type=float,
-                      help="Source share or replacement rate for performance and privacy–utility (one shift type)")
+    experiment = commands.add_parser("experiment", help="Run the signed study and write results.csv")
+    experiment.add_argument("--output", default=DEFAULT_OUTPUT)
+    experiment.add_argument("--config", default=DEFAULT_CONFIG)
+    experiment.add_argument("--records", help="Input patient records CSV")
+    experiment.add_argument("--workers", type=int, default=1, help="Number of CPU workers for repeats")
+    plot = commands.add_parser("plot", help="Plot signed response, privacy interaction, and negative transfer")
+    slides = commands.add_parser("plot-slides", help="Create slides 6 and 7 from results.csv")
+    for command in (plot, slides):
+        command.add_argument("--input", required=True, help="Signed results directory or results.csv")
+        command.add_argument("--output", type=Path, help="Figure directory")
     return cli
 
 
-def display(title, rows):
-    print(f"\n{title}", flush=True)
-    formatted = {label.replace("_", " ").capitalize(): f"{value:.6g}" if isinstance(value, float) else value
-                 for label, value in rows.items()}
-    width = max(map(len, formatted))
-    for label, value in formatted.items():
-        print(f"  {label:<{width}}  {value}", flush=True)
-
-
 def main(argv=None):
-    cli = parser()
-    args = cli.parse_args(argv)
-    output = Path(args.output) if args.output is not None else None
-    active_stage = args.command
+    args = parser().parse_args(argv)
 
     def progress(message):
-        print(f"[{active_stage}] {message}", flush=True)
+        print(f"[{args.command}] {message}", flush=True)
 
     try:
-        if args.command == "plot":
-            from .evaluation.report import run
-            display("PLOTS COMPLETE", run(args.input, output, progress=progress,
-                                         epsilon=args.epsilon, shift=args.shift, fraction=args.fraction))
-            return
-        if args.command == "plot-slides":
-            from .evaluation.slides import run
-            display("SLIDE PLOTS COMPLETE", run(args.input, output, progress=progress))
-            return
-        from .sweep import run
-        display(f"{args.command.upper()} COMPLETE",
-                run(output, args.config, progress=progress, workers=args.workers))
+        if args.command == "experiment":
+            from .sweep import run
+            result = run(args.output, args.config, args.records, workers=args.workers, progress=progress)
+        else:
+            from .evaluation import plots, slides
+            command = plots if args.command == "plot" else slides
+            result = command.run(args.input, args.output, progress=progress)
+        print("\n" + args.command.upper() + " COMPLETE", flush=True)
+        for label, value in result.items():
+            print(f"  {label.replace('_', ' ').capitalize():<20} {value}", flush=True)
     except (ValueError, OSError, KeyError, RuntimeError, AssertionError, ImportError) as error:
-        message = str(error)
-        print(f"\n{active_stage.upper()} FAILED: {message}", file=sys.stderr)
-        if isinstance(error, ImportError):
-            print("Install dependencies with python -m pip install -r requirements.txt.", file=sys.stderr)
+        print(f"\n{args.command.upper()} FAILED: {error}", file=sys.stderr)
         raise SystemExit(1) from None
     except KeyboardInterrupt:
-        print(f"\n{active_stage.upper()} INTERRUPTED. Run the same command to reuse completed comparisons "
-              "and resume evaluation. Partial training jobs require investigation.", file=sys.stderr)
+        print(f"\n{args.command.upper()} INTERRUPTED", file=sys.stderr)
         raise SystemExit(130) from None
