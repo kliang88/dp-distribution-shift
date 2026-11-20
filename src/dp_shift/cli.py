@@ -21,8 +21,10 @@ def parser():
     experiment.add_argument("--workers", type=int, default=1,
                             help="Number of CPU processes for comparison cells (default: %(default)s)")
     plot = commands.add_parser("plot", help="Create figures from retained CSV data without training")
-    plot.add_argument("--input", required=True, help="Results directory, data/ directory, or runs.csv")
-    plot.add_argument("--output", help="Figure directory (default: <results>/plots)")
+    slides = commands.add_parser("plot-slides", help="Create AUPRC and AUROC figures for slides 6 and 7 at ε=5")
+    for command, directory in ((plot, "plots"), (slides, "plots/slides")):
+        command.add_argument("--input", required=True, help="Results directory, data/ directory, or runs.csv")
+        command.add_argument("--output", help=f"Figure directory (default: <results>/{directory})")
     plot.add_argument("--epsilon", type=float, help="Budget for overall performance (default: 1 if available, otherwise smallest)")
     plot.add_argument("--shift", choices=list(SHIFTS), help="Plot one shift type (default: all available)")
     plot.add_argument("--fraction", "--prevalence", dest="fraction", type=float,
@@ -53,6 +55,10 @@ def main(argv=None):
             from .evaluation.report import run
             display("PLOTS COMPLETE", run(args.input, output, progress=progress,
                                          epsilon=args.epsilon, shift=args.shift, fraction=args.fraction))
+            return
+        if args.command == "plot-slides":
+            from .evaluation.slides import run
+            display("SLIDE PLOTS COMPLETE", run(args.input, output, progress=progress))
             return
         from .sweep import run
         display(f"{args.command.upper()} COMPLETE",

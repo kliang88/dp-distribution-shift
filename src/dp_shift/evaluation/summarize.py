@@ -1,4 +1,4 @@
-"""Paired AUPRC effects and uncertainty across repeats on a fixed test set."""
+"""Paired metric effects and uncertainty across repeats on a fixed test set."""
 
 import numpy as np
 import pandas as pd
@@ -9,10 +9,10 @@ from dp_shift.data.utils import require
 from .tables import GRID
 
 
-def paired_effects(runs):
+def paired_effects(runs, *, metric="auprc"):
     """Calculate contrasts within each comparison and repeat of a validated table."""
-    ap = runs.pivot(index=[*GRID, "repeat"], columns=["method", "pretraining"], values="auprc")
-    sgd, dp = ap["sgd"], ap["dp_sgd"]
+    scores = runs.pivot(index=[*GRID, "repeat"], columns=["method", "pretraining"], values=metric)
+    sgd, dp = scores["sgd"], scores["dp_sgd"]
     penalty_sgd = sgd.baseline - sgd.shifted
     penalty_dp = dp.baseline - dp.shifted
     return pd.DataFrame({

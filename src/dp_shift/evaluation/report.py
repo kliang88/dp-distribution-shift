@@ -24,9 +24,7 @@ def selected(value, available, name, *, preferred=None):
     return value
 
 
-def run(input, output=None, progress=print, *, epsilon=None, shift=None, fraction=None):
-    from .plots import FIGURES, plot
-
+def plot_paths(input, output, *, default_directory="plots"):
     input = Path(input).resolve()
     if input.is_file():
         path = input
@@ -36,9 +34,16 @@ def run(input, output=None, progress=print, *, epsilon=None, shift=None, fractio
         path = input / tables.RUNS_FILE
     data_directory = path.parent
     root = data_directory.parent if data_directory.name == "data" else data_directory
-    output = Path(output).resolve() if output is not None else root / "plots"
+    output = Path(output).resolve() if output is not None else root / default_directory
     require(output != root and (data_directory == root or not output.is_relative_to(data_directory)),
             "Plot output must be separate from the data directory")
+    return path, output
+
+
+def run(input, output=None, progress=print, *, epsilon=None, shift=None, fraction=None):
+    from .plots import FIGURES, plot
+
+    path, output = plot_paths(input, output)
     progress("Reading and validating model scores and cohort counts…")
     runs = tables.read(path)
     if shift is not None:

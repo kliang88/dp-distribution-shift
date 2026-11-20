@@ -10,6 +10,76 @@ from dp_shift.evaluation.tables import CONDITIONS
 from dp_shift.evaluation.summarize import paired_effects
 
 
+def test_slide_plots_use_epsilon_five_and_average_severities_before_intervals(monkeypatch, tmp_path):
+    from scipy.stats import t
+
+    from dp_shift.cli import main
+    from dp_shift.evaluation import plots, tables
+
+    levels = {
+        "readmission": (.01, .04, .14, .17),
+        "age_70_plus": (.6, .7, .8, .9),
+        "clinical_complexity_2plus": (.05, .10, .15, .20),
+        "primary_diagnosis_circulatory": (.05, .10, .15, .20),
+    }
+    repeats = np.arange(20)
+    rows = []
+    for shift_index, (kind, fractions) in enumerate(levels.items()):
+        for (severity, fraction), epsilon, repeat in product(enumerate(fractions), (1, 5), repeats):
+            for method, pretraining in CONDITIONS.values():
+                scale = 1 if method == "dp_sgd" else .5
+                scratch = .2 + .001 * repeat
+                gain = (.015 + .003 * shift_index + .004 * severity
+                        + .0003 * (severity + 1) * (repeat - 9.5) + .02 * (epsilon == 1))
+                scores = {"none": scratch, "baseline": scratch + .020 * scale, "shifted": scratch + gain * scale}
+                shifted_fraction = fraction + .2 if shift_index >= 2 else fraction
+                shares = {"none": np.nan, "baseline": .2, "shifted": shifted_fraction}
+                auprc = scores[pretraining]
+                auroc = .4 + 1.5 * auprc
+                rows.append((kind, fraction, epsilon, repeat, method, pretraining, auprc, auroc, .2,
+                             shares[pretraining], np.nan if pretraining == "none" else 100, .0863, 10000))
+    tables.write(tmp_path / tables.RUNS_FILE, pd.DataFrame(rows, columns=tables.COLUMNS))
+
+    captured = {}
+    original_save = plots.save
+
+    def inspect(figure, output, name, caption, **kwargs):
+        assert caption == "ε = 5, n = 20 repeats, 95% CI"
+        captured[name] = figure.axes[0]
+        original_save(figure, output, name, caption, **kwargs)
+
+    monkeypatch.setattr(plots, "save", inspect)
+    main(["plot-slides", "--input", str(tmp_path)])
+    assert len(captured) == 4
+    expected_margin = 100 * .0003 * t.ppf(.975, 19) * repeats.std(ddof=1) / np.sqrt(20)
+    for suffix, metric_label, metric_scale in (("", "AUPRC", 1), ("_auroc", "AUROC", 1.5)):
+        readmission = captured[f"slide6_readmission_prevalence{suffix}"]
+        gain = captured[f"slide7_pretraining_gain{suffix}"]
+        assert metric_label in readmission.get_ylabel()
+        assert metric_label in gain.get_ylabel()
+        assert gain.get_ylim()[0] < 0
+        bars = [series for series in gain.containers if hasattr(series, "patches")]
+        for line, group, method_scale, offset in zip(readmission.containers, bars, (1, .5), (-.18, .18), strict=True):
+            scale = metric_scale * method_scale
+            shift_means = 100 * scale * (-.005 + .004 * np.arange(4))
+            gain_means = 100 * scale * (.021 + .003 * np.arange(4))
+            np.testing.assert_allclose(line.lines[0].get_xdata(), [1, 4, 14, 17])
+            np.testing.assert_allclose(line.lines[0].get_ydata(), shift_means)
+            np.testing.assert_allclose([bar.get_x() + bar.get_width() / 2 for bar in group], np.arange(4) + offset)
+            np.testing.assert_allclose([bar.get_height() for bar in group], gain_means)
+            assert all(bar.get_y() == 0 for bar in group)
+            for series, means, margin in (
+                (line, shift_means, expected_margin * scale * np.arange(1, 5)),
+                (group.errorbar, gain_means, expected_margin * scale * 2.5),
+            ):
+                bounds = np.asarray(series.lines[2][0].get_segments())[:, :, 1]
+                np.testing.assert_allclose(bounds, np.column_stack((means - margin, means + margin)))
+    output = tmp_path / "plots/slides"
+    assert {path.name for path in output.iterdir()} == {f"{name}.png" for name in captured}
+    for name in captured:
+        assert (output / f"{name}.png").read_bytes().startswith(b"\x89PNG")
+
+
 def test_figures_use_paired_repeats_and_positive_amplification(monkeypatch, tmp_path):
     from dp_shift.evaluation import plots
 

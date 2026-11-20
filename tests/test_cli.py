@@ -21,7 +21,7 @@ def test_experiment_defaults_to_the_unified_config():
     assert parser().parse_args(["experiment"]).config == "configs/experiment.json"
 
 
-@pytest.mark.parametrize("command", ["experiment", "plot"])
+@pytest.mark.parametrize("command", ["experiment", "plot", "plot-slides"])
 def test_help_does_not_import_training_or_plotting(command):
     script = f"""
 import sys
@@ -35,10 +35,10 @@ assert not {'torch', 'opacus', 'matplotlib'} & sys.modules.keys()
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert "--output" in result.stdout
-    assert ("--input" if command == "plot" else "--config") in result.stdout
+    assert ("--config" if command == "experiment" else "--input") in result.stdout
     result = subprocess.run([sys.executable, "-m", "dp_shift", "--help"], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert "{experiment,plot}" in result.stdout
+    assert "{experiment,plot,plot-slides}" in result.stdout
 
 
 @pytest.mark.parametrize("command", ["sweep", "prepare", "train", "evaluate", "all", "verify"])
