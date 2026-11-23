@@ -10,32 +10,44 @@ from dp_shift.evaluation import plots
 
 def test_signed_plots_use_the_signed_grid_and_one_heatmap_scale(monkeypatch, tmp_path, signed_results):
     frame = signed_results(repeats=2)
+    frame["auprc"] += np.where(frame.method.eq("DP-SGD"), frame.shift_pp / 2000, 0)
+    frame["auroc"] = .3 + 2 * frame.auprc
     frame.to_csv(tmp_path / "results.csv", index=False)
     captured = {}
     original_save = plots.save
 
     def inspect(figure, output, name, caption, **kwargs):
+        if name.startswith(("readmission_prevalence_", "average_pretraining_gain_")):
+            return original_save(figure, output, name, caption, **kwargs)
         captured[name] = len(figure.axes)
-        if name == "privacy_shift_interaction":
+        scale = 2 if name.endswith("_auroc") else 1
+        metric = "AUROC" if scale == 2 else "AUPRC"
+        if name.startswith("privacy_shift_interaction_"):
             images = [axis.images[0] for axis in figure.axes[:4]]
             assert len({image.get_clim() for image in images}) == 1
             assert all(image.get_array().shape == (5, 8) for image in images)
-        elif name == "signed_shift_response":
+            for image in images:
+                np.testing.assert_allclose(image.get_array(), np.tile(-scale * np.asarray(SIGNED_LEVELS) / 20, (5, 1)), atol=1e-12)
+            assert metric in figure.axes[-1].get_ylabel()
+        elif name.startswith("source_shift_"):
             for axis in figure.axes:
                 assert len(axis.containers) == 4
                 np.testing.assert_array_equal(axis.containers[0].lines[0].get_xdata(), np.arange(-8, 9, 2))
+                np.testing.assert_allclose(axis.containers[0].lines[0].get_ydata(), scale * np.arange(-8, 9, 2) / 10, atol=1e-12)
         else:
             for axis in figure.axes:
                 assert len(axis.containers) == 5
                 for curve in axis.containers:
                     np.testing.assert_array_equal(curve.lines[0].get_xdata(), SIGNED_LEVELS)
-                    np.testing.assert_allclose(curve.lines[0].get_ydata(), 1 + np.asarray(SIGNED_LEVELS) / 10)
+                    np.testing.assert_allclose(curve.lines[0].get_ydata(), scale * (1 + 1.5 * np.asarray(SIGNED_LEVELS) / 10))
         original_save(figure, output, name, caption, **kwargs)
 
     monkeypatch.setattr(plots, "save", inspect)
     main(["plot", "--input", str(tmp_path)])
-    assert captured == {"signed_shift_response": 4, "privacy_shift_interaction": 5, "negative_transfer": 4}
-    assert len(list((tmp_path / "plots").glob("*.png"))) == 3
+    assert captured == {f"{name}_{metric}": axes for metric in ("auprc", "auroc")
+                        for name, axes in (("source_shift", 4), ("privacy_shift_interaction", 5),
+                                           ("pretraining_vs_scratch", 4))}
+    assert len(list((tmp_path / "plots").glob("*.png"))) == 10
 
 
 def test_slide_plots_use_epsilon_five_and_average_severities_before_intervals(monkeypatch, tmp_path, signed_results):
@@ -55,17 +67,21 @@ def test_slide_plots_use_epsilon_five_and_average_severities_before_intervals(mo
     original_save = plots.save
 
     def inspect(figure, output, name, caption, **kwargs):
+        if not name.startswith(("readmission_prevalence_", "average_pretraining_gain_")):
+            return original_save(figure, output, name, caption, **kwargs)
         assert caption == "ε = 5, n = 20 paired repeats, 95% CI"
         captured[name] = figure.axes[0]
         original_save(figure, output, name, caption, **kwargs)
 
     monkeypatch.setattr(plots, "save", inspect)
-    main(["plot-slides", "--input", str(path)])
+    main(["plot", "--input", str(path), "--output", str(tmp_path / "custom-plots")])
     assert len(captured) == 4
     expected_margin = 100 * .0003 * t.ppf(.975, 19) * np.arange(1, 21).std(ddof=1) / np.sqrt(20)
-    for suffix, metric_label, metric_scale in (("", "AUPRC", 1), ("_auroc", "AUROC", 1.5)):
-        readmission = captured[f"slide6_readmission_prevalence{suffix}"]
-        gain = captured[f"slide7_pretraining_gain{suffix}"]
+    for suffix, metric_label, metric_scale in (("_auprc", "AUPRC", 1), ("_auroc", "AUROC", 1.5)):
+        readmission = captured[f"readmission_prevalence{suffix}"]
+        gain = captured[f"average_pretraining_gain{suffix}"]
+        assert readmission.get_title() == f"How Source Readmission Prevalence Affects Target {metric_label}"
+        assert gain.get_title() == f"Average {metric_label} Gain from Pretraining by Source Shift Type"
         assert metric_label in readmission.get_ylabel()
         assert metric_label in gain.get_ylabel()
         assert gain.get_ylim()[0] < 0
@@ -86,7 +102,11 @@ def test_slide_plots_use_epsilon_five_and_average_severities_before_intervals(mo
             ):
                 bounds = np.asarray(series.lines[2][0].get_segments())[:, :, 1]
                 np.testing.assert_allclose(bounds, np.column_stack((means - margin, means + margin)))
-    output = tmp_path / "plots/slides"
-    assert {path.name for path in output.iterdir()} == {f"{name}.png" for name in captured}
+    output = tmp_path / "custom-plots"
+    assert {path.name for path in output.iterdir()} == {
+        *{f"{name}.png" for name in captured},
+        *{f"{name}_{metric}.png" for metric in ("auprc", "auroc")
+          for name in ("source_shift", "privacy_shift_interaction", "pretraining_vs_scratch")},
+    }
     for name in captured:
         assert (output / f"{name}.png").read_bytes().startswith(b"\x89PNG")

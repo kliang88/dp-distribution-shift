@@ -18,11 +18,9 @@ def parser():
     experiment.add_argument("--config", default=DEFAULT_CONFIG)
     experiment.add_argument("--records", help="Input patient records CSV")
     experiment.add_argument("--workers", type=int, default=1, help="Number of CPU workers for repeats")
-    plot = commands.add_parser("plot", help="Plot signed response, privacy interaction, and negative transfer")
-    slides = commands.add_parser("plot-slides", help="Create slides 6 and 7 from results.csv")
-    for command in (plot, slides):
-        command.add_argument("--input", required=True, help="Signed results directory or results.csv")
-        command.add_argument("--output", type=Path, help="Figure directory")
+    plot = commands.add_parser("plot", help="Create research plots and AUPRC/AUROC slide figures")
+    plot.add_argument("--input", required=True, help="Signed results directory or results.csv")
+    plot.add_argument("--output", type=Path, help="Figure directory")
     return cli
 
 
@@ -38,8 +36,9 @@ def main(argv=None):
             result = run(args.output, args.config, args.records, workers=args.workers, progress=progress)
         else:
             from .evaluation import plots, slides
-            command = plots if args.command == "plot" else slides
-            result = command.run(args.input, args.output, progress=progress)
+            result = plots.run(args.input, args.output, progress=progress)
+            slide_result = slides.run(args.input, Path(result["output"]), progress=progress)
+            result["figures"] += slide_result["figures"]
         print("\n" + args.command.upper() + " COMPLETE", flush=True)
         for label, value in result.items():
             print(f"  {label.replace('_', ' ').capitalize():<20} {value}", flush=True)

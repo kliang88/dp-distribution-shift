@@ -21,7 +21,7 @@ METHODS = (("DP-SGD", "#2166ac", -.18), ("SGD", "#d95f02", .18))
 def save_slide(figure, axis, output, name, metric, repeats):
     axis.axhline(0, color="gray", linestyle="--", linewidth=1)
     axis.legend(frameon=False)
-    filename = name if metric == "auprc" else f"{name}_{metric}"
+    filename = f"{name}_{metric}"
     caption = f"ε = {EPSILON}, n = {repeats} paired repeats"
     if repeats > 1:
         caption += ", 95% CI"
@@ -40,8 +40,8 @@ def readmission_prevalence(effects, target, output, metric, repeats):
                  label=f"Target prevalence {target:.2%}")
     axis.set(xlabel="Source readmission prevalence (%)",
              ylabel=f"Shifted − baseline {metric.upper()}\n(percentage points)",
-             title="Effect of source readmission prevalence on target performance")
-    save_slide(figure, axis, output, "slide6_readmission_prevalence", metric, repeats)
+             title=f"How Source Readmission Prevalence Affects Target {metric.upper()}")
+    save_slide(figure, axis, output, "readmission_prevalence", metric, repeats)
 
 
 def pretraining_gain(effects, output, metric, repeats):
@@ -56,13 +56,13 @@ def pretraining_gain(effects, output, metric, repeats):
     axis.set(xticks=positions, xticklabels=list(SHIFT_LABELS.values()),
              xlim=(-.5, len(SHIFT_LABELS) - .5),
              ylabel=f"Shifted pretraining − scratch {metric.upper()}\n(percentage points)",
-             title="Pretraining gain across source shift types")
-    save_slide(figure, axis, output, "slide7_pretraining_gain", metric, repeats)
+             title=f"Average {metric.upper()} Gain from Pretraining by Source Shift Type")
+    save_slide(figure, axis, output, "average_pretraining_gain", metric, repeats)
 
 
 def run(input, output=None, progress=print):
     path = tables.results_path(input)
-    output = Path(output) if output is not None else path.parent / "plots/slides"
+    output = Path(output) if output is not None else path.parent / "plots"
     results = tables.read(path)
     private = results.epsilon.eq(EPSILON)
     require(private.any(), f"Slide figures require DP-SGD at ε = {EPSILON}")

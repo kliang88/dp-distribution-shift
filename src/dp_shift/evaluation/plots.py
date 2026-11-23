@@ -1,4 +1,4 @@
-"""Plot the signed study's three research figures from results.csv."""
+"""Plot the signed study's AUPRC and AUROC research figures from results.csv."""
 
 import os
 from pathlib import Path
@@ -78,21 +78,21 @@ def private_series(effects, budgets):
             for epsilon in budgets if epsilon in available]
 
 
-def response(effects, output):
+def response(effects, output, metric="auprc"):
     series = [("SGD", effects.epsilon.isna(), "#303942"), *private_series(effects, (1, 5, 10))]
-    signed_curves(effects, series, output, "signed_shift_response",
-                  title="Effect of source shifts on target AUPRC",
-                  ylabel="AUPRC difference (percentage points)\nShifted pretraining − unshifted pretraining",
+    signed_curves(effects, series, output, f"source_shift_{metric}",
+                  title=f"How Source Shifts Affect Target {metric.upper()}",
+                  ylabel=f"{metric.upper()} difference (percentage points)\nShifted pretraining − unshifted pretraining",
                   include_origin=True)
 
 
-def negative_transfer(effects, output):
-    signed_curves(effects, private_series(effects, DP_COLORS), output, "negative_transfer",
-                  title="Shifted pretraining vs. training from scratch",
-                  ylabel="AUPRC difference (percentage points)\nShifted pretraining − training from scratch")
+def negative_transfer(effects, output, metric="auprc"):
+    signed_curves(effects, private_series(effects, DP_COLORS), output, f"pretraining_vs_scratch_{metric}",
+                  title=f"Does Shifted Pretraining Improve Target {metric.upper()}?",
+                  ylabel=f"{metric.upper()} difference (percentage points)\nShifted pretraining − training from scratch")
 
 
-def heatmaps(effects, output):
+def heatmaps(effects, output, metric="auprc"):
     values = interaction(effects).groupby(["shift_type", "epsilon", "shift_pp"]).interaction.mean() * 100
     bound = max(float(values.abs().max()), 1e-6)
     figure, axes = plt.subplots(2, 2, figsize=(10, 7), sharex=True, sharey=True, layout="constrained")
@@ -103,24 +103,25 @@ def heatmaps(effects, output):
         axis.set_title(label)
         axis.set_xticks(range(len(matrix.columns)), shift_tick_labels(matrix.columns))
         axis.set_yticks(range(len(matrix.index)), [f"{epsilon:g}" for epsilon in matrix.index])
-    figure.suptitle("How privacy changes the effect of source shifts", fontsize=16, fontweight="semibold")
+    figure.suptitle(f"How Privacy Changes the Response to Source Shifts ({metric.upper()})", fontsize=16, fontweight="semibold")
     figure.supxlabel(SHIFT_AXIS_LABEL, y=.065)
     figure.supylabel("DP-SGD privacy budget (ε)")
-    figure.colorbar(image, ax=axes, label="AUPRC change under SGD − AUPRC change under DP-SGD (percentage points)")
-    save(figure, output, "privacy_shift_interaction",
+    figure.colorbar(image, ax=axes, label=f"{metric.upper()} change under SGD − {metric.upper()} change under DP-SGD (percentage points)")
+    save(figure, output, f"privacy_shift_interaction_{metric}",
          f"n = {effects.repeat.nunique()} paired repeats. "
-         "Positive values indicate a larger AUPRC drop or a smaller gain under DP-SGD than under SGD.")
+         f"Positive values indicate a larger {metric.upper()} drop or a smaller gain under DP-SGD than under SGD.")
 
 
 def run(input, output=None, progress=print):
     path = tables.results_path(input)
     output = Path(output) if output is not None else path.parent / "plots"
     results = tables.read(path)
-    effects = signed_effects(results)
     output.mkdir(parents=True, exist_ok=True)
-    progress("Plotting signed response, privacy–shift interaction, and negative transfer…")
+    progress("Plotting AUPRC and AUROC source shifts, privacy interactions, and pretraining gains…")
     with plt.rc_context({"axes.spines.top": False, "axes.spines.right": False}):
-        response(effects, output)
-        heatmaps(effects, output)
-        negative_transfer(signed_effects(results, reference="scratch"), output)
-    return {"figures": 3, "output": str(output)}
+        for metric in ("auprc", "auroc"):
+            effects = signed_effects(results, metric)
+            response(effects, output, metric)
+            heatmaps(effects, output, metric)
+            negative_transfer(signed_effects(results, metric, reference="scratch"), output, metric)
+    return {"figures": 6, "output": str(output)}

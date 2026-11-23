@@ -18,6 +18,12 @@ def test_signed_plot_rejects_legacy_options():
     assert error.value.code == 2
 
 
+def test_separate_slide_command_is_removed():
+    with pytest.raises(SystemExit) as error:
+        parser().parse_args(["plot-slides", "--input", "results"])
+    assert error.value.code == 2
+
+
 def test_missing_results_is_reported(tmp_path, capsys):
     with pytest.raises(SystemExit) as error:
         main(["plot", "--input", str(tmp_path)])
