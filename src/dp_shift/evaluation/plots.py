@@ -106,7 +106,7 @@ def heatmaps(effects, output):
     figure.suptitle("How privacy changes the effect of source shifts", fontsize=16, fontweight="semibold")
     figure.supxlabel(SHIFT_AXIS_LABEL, y=.065)
     figure.supylabel("DP-SGD privacy budget (ε)")
-    figure.colorbar(image, ax=axes, label="Extra AUPRC penalty under DP-SGD\n(percentage points)")
+    figure.colorbar(image, ax=axes, label="AUPRC change under SGD − AUPRC change under DP-SGD (percentage points)")
     save(figure, output, "privacy_shift_interaction",
          f"n = {effects.repeat.nunique()} paired repeats. "
          "Positive values indicate a larger AUPRC drop or a smaller gain under DP-SGD than under SGD.")
