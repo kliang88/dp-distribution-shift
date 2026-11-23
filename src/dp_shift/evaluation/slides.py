@@ -18,19 +18,25 @@ SHIFT_LABELS = {
 METHODS = (("DP-SGD", "#2166ac", -.18), ("SGD", "#d95f02", .18))
 
 
-def save_slide(figure, axis, output, name, metric, repeats):
+def save_slide(figure, axis, output, name, metric, repeats, *, standalone=True):
     axis.axhline(0, color="gray", linestyle="--", linewidth=1)
-    axis.legend(frameon=False)
     filename = f"{name}_{metric}"
     caption = f"ε = {EPSILON}, n = {repeats} paired repeats"
     if repeats > 1:
         caption += ", 95% CI"
-    plots.save(figure, output, filename, caption, layout_rect=(0, .07, 1, 1))
+    if standalone:
+        axis.legend(frameon=False)
+        plots.save(figure, output, filename, caption, layout_rect=(0, .07, 1, 1))
+    return caption
 
 
-def readmission_prevalence(effects, target, output, metric, repeats):
+def readmission_prevalence(effects, target, output, metric, repeats, *, axis=None):
     readmission = effects.loc[effects.shift_type.eq("readmission")]
-    figure, axis = plots.plt.subplots(figsize=(8.5, 4.7))
+    standalone = axis is None
+    if standalone:
+        figure, axis = plots.plt.subplots(figsize=(8.5, 4.7))
+    else:
+        figure = axis.figure
     for method, color, _ in METHODS:
         selected = readmission.loc[readmission.method.eq(method)]
         points = [(100 * (group.source_readmission_count / group.source_size).mean(), group.gain)
@@ -41,12 +47,18 @@ def readmission_prevalence(effects, target, output, metric, repeats):
     axis.set(xlabel="Source readmission prevalence (%)",
              ylabel=f"Shifted − baseline {metric.upper()}\n(percentage points)",
              title=f"How Source Readmission Prevalence Affects Target {metric.upper()}")
-    save_slide(figure, axis, output, "readmission_prevalence", metric, repeats)
+    if not standalone:
+        axis.set_xlabel("")
+    return save_slide(figure, axis, output, "readmission_prevalence", metric, repeats, standalone=standalone)
 
 
-def pretraining_gain(effects, output, metric, repeats):
+def pretraining_gain(effects, output, metric, repeats, *, axis=None):
     gains = effects.groupby(["method", "shift_type", "repeat"]).gain.mean()
-    figure, axis = plots.plt.subplots(figsize=(9, 4.7))
+    standalone = axis is None
+    if standalone:
+        figure, axis = plots.plt.subplots(figsize=(9, 4.7))
+    else:
+        figure = axis.figure
     axis.use_sticky_edges = False  # Keep the zero reference visible when all intervals are above zero.
     positions = range(len(SHIFT_LABELS))
     for method, color, offset in METHODS:
@@ -57,7 +69,7 @@ def pretraining_gain(effects, output, metric, repeats):
              xlim=(-.5, len(SHIFT_LABELS) - .5),
              ylabel=f"Shifted pretraining − scratch {metric.upper()}\n(percentage points)",
              title=f"Average {metric.upper()} Gain from Pretraining by Source Shift Type")
-    save_slide(figure, axis, output, "average_pretraining_gain", metric, repeats)
+    return save_slide(figure, axis, output, "average_pretraining_gain", metric, repeats, standalone=standalone)
 
 
 def run(input, output=None, progress=print):
@@ -73,7 +85,12 @@ def run(input, output=None, progress=print):
     progress(f"Creating AUPRC and AUROC slide figures at ε={EPSILON}…")
     output.mkdir(parents=True, exist_ok=True)
     with plots.plt.rc_context({"axes.spines.top": False, "axes.spines.right": False}):
-        for metric in METRICS:
-            readmission_prevalence(signed_effects(selected, metric), target, output, metric, repeats)
-            pretraining_gain(signed_effects(selected, metric, reference="scratch"), output, metric, repeats)
-    return {"figures": 2 * len(METRICS), "epsilon": EPSILON, "repeats": repeats, "output": str(output)}
+        plots.paired_metrics(output, "readmission_prevalence", "How Source Readmission Prevalence Affects Target Performance",
+                             lambda axis, metric: readmission_prevalence(
+                                 signed_effects(selected, metric), target, output, metric, repeats, axis=axis),
+                             xlabel="Source readmission prevalence (%)", legend=True)
+        plots.paired_metrics(output, "average_pretraining_gain", "Average Gain from Pretraining by Source Shift Type",
+                             lambda axis, metric: pretraining_gain(
+                                 signed_effects(selected, metric, reference="scratch"), output, metric, repeats, axis=axis),
+                             legend=True)
+    return {"figures": 2, "epsilon": EPSILON, "repeats": repeats, "output": str(output)}
